@@ -1,0 +1,14 @@
+# Runtime state may contain listening history, device backups, and test results.
+/state/
+
+# Downloaded by setup.ps1. Do not redistribute third-party binaries or local config.
+/tools/SoundVolumeView/
+
+# Local/editor artifacts.
+*.log
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
