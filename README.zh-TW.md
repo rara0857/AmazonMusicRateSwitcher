@@ -57,67 +57,31 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 `scripts\setup.ps1` 會把 SoundVolumeView 下載到專案的 `tools` 資料夾。Runtime state、播放紀錄、測試報告、device backup 與下載的第三方檔案都不會加入 Git。
 
-## 使用
+## 快速開始
+
+一般使用時，直接點兩下 `Start-AutoSwitch.cmd`。預設會走 ASIO path：
+
+`Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC`
+
+如果不想使用 ASIO，先把想用的 DAC／喇叭設成 Windows default，再在專案資料夾執行：
 
 ~~~powershell
-# 讀取目前 Amazon format
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Probe
-
-# 列出 audio output devices
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Devices
-
-# 只 monitor，不切換 output format
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Cdp
-
-# monitor 並套用 format switch
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Apply -Cdp
-
-# 執行 queue-safe AutoTest
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
+.\Start-AutoSwitch.cmd direct
 ~~~
 
-也可以使用 `Start-AutoSwitch.cmd` 啟動一般監看，或使用 `Run-AutoTest.cmd` 執行 queue test。`Start-AutoSwitch.cmd` 預設使用 Hi-Fi Cable／ASIO path；執行 `Start-AutoSwitch.cmd direct` 則會把 Amazon 直接導向目前 Windows default render endpoint，方便測試 non-ASIO path。啟動 direct mode 前，請先把想用的 DAC／喇叭設成 Windows default。單次查看目前格式或列出裝置時，使用 `-Mode Probe` 或 `-Mode Devices` 即可。
+`Run-AutoTest.cmd` 是選用功能，用來執行 queue test。只需要單次診斷時，再使用 PowerShell script 的 `-Mode Probe` 或 `-Mode Devices`。
 
-專案根目錄只保留兩個 launcher、設定檔與 README。PowerShell script 放在 `scripts`；`state` 和 `tools` 會在本機執行時建立或下載。
+AutoTest 結束時，console 會顯示平均 latency；每首 track 的詳細結果保留在 `state/auto-test-latest.json`，統計結果寫入 `state/auto-test-summary.json`。
 
-如果要持續監看 endpoint 的 bit depth／sample rate，不需要新增根目錄 launcher：
+## AutoTest
 
-~~~powershell
-.\scripts\Watch-DeviceFormat.ps1 -IntervalMs 100
-~~~
+執行 `Run-AutoTest.cmd` 前，請先登入 Amazon Music、開始播放、開啟 autoplay，並在目前 queue 後面準備足夠的可播放 track。測試期間不要操作 Amazon Music，也不要讓同一條 ASIO path 播放其他音訊。
 
-只讀一次可以加上 `-Once`；如果要指定裝置，使用 `-Mode Devices` 顯示的 command-line-friendly ID 搭配 `-DeviceId`。
-
-AutoTest 結束時，console 會顯示 successful tracks、需要切換 format 的 tracks，以及 same-format tracks 的平均 latency。每首 track 的詳細結果保留在 `state/auto-test-latest.json`，統計結果寫入 `state/auto-test-summary.json`。
-
-## AutoTest 注意事項
-
-AutoTest 會透過 NextTrack 讓 Amazon Music 連續播放。開始前請先確認：
-
-1. 已開啟 Amazon Music、完成登入，並且正在播放。
-2. 已開啟 autoplay／continuous playback。
-3. 目前 queue 後面有足夠的可播放 track。要測 20 首時，建議目前位置後面至少準備 20 首以上。
-4. 測試期間不要手動操作 Amazon Music，也不要讓同一條 ASIO path 同時播放其他音訊。
-
-如果 queue 播完，AutoTest 會回報 next-track timeout；這代表 queue 或播放設定不足，不代表 sample-rate switch 失敗。可以自行降低測試數量：
-
-~~~powershell
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 5 -Cdp
-~~~
-
-CDP launch mode 會在需要時用 debugging port 啟動 Amazon Music。啟動過程可能會開啟或重開 Amazon Music，並重置目前的 queue。若已找到正在執行的 Amazon process 和可用的 CDP port，程式會優先沿用，不主動重開。想避免不必要的 relaunch，可以先開好 Amazon，再使用 -Cdp 而不要加 -CdpLaunch；找不到 debugging port 時，程式可以退回使用 AmazonMusic.log。
+AutoTest 會透過 NextTrack 播放；queue 播完時的 next-track timeout 代表播放設定不足，不代表 sample-rate switch 失敗。CDP launch mode 可能重開 Amazon 並重置 queue；若已存在可用的 CDP port，程式會沿用現有程序。
 
 ## 設定
 
-編輯 `config.json`：
-
-- deviceId：從 -Mode Devices 取得的 device ID，優先於其他選擇方式；留空則使用 Windows default output device。
-- deviceNamePattern：選用的 wildcard pattern，例如 Hi-Fi Cable Input*。
-- trackPollMilliseconds：track detection interval。
-- waitForRebuildSeconds：等待 Amazon rebuild stream 的最長時間。
-- showDetailedTiming：預設為 false，只顯示每首 track 的 total；設為 true 才會列出所有 timing stage。完整 timing 一律保留在 AutoTest JSON。
-
-如果使用 Hi-Fi Cable，請把 Amazon Music 的 per-app output 設為 Hi-Fi Cable Input，再由 ASIO4ALL／ASIO Bridge 轉送到 hardware output。
+大多數情況不需要修改 `config.json`。進階設定包含 target endpoint（`deviceId` 或 `deviceNamePattern`）、track polling interval、Amazon rebuild timeout，以及 `showDetailedTiming`。
 
 ## Audio flow
 
@@ -137,8 +101,6 @@ Amazon Music
 
 Rate Switcher ── 修改 bit depth 與 sample rate ──► selected Windows render endpoint
 ~~~
-
-Direct mode 會把 Amazon Music 直接送到目前的 Windows default render device，不需要 Hi-Fi Cable、ASIO Bridge 或 ASIO4ALL。先把想用的 DAC／喇叭設成 Windows default，再執行 `Start-AutoSwitch.cmd direct`。一般啟動的 `Start-AutoSwitch.cmd` 則使用 Hi-Fi Cable／ASIO path。
 
 ### Native ASIO driver 與 ASIO4ALL
 

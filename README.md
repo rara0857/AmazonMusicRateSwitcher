@@ -57,67 +57,31 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 `scripts\setup.ps1` downloads SoundVolumeView into the local `tools` folder. Runtime state, listening history, test reports, device backups, and downloaded third-party files are excluded from Git.
 
-## Use
+## Quick start
+
+For normal use, double-click `Start-AutoSwitch.cmd`. It starts the ASIO path:
+
+`Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC`
+
+For direct output without ASIO, set the desired DAC/speakers as the Windows default, then run this from the project folder:
 
 ~~~powershell
-# Read the current Amazon format
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Probe
-
-# List render endpoints
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Devices
-
-# Monitor without changing the endpoint
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Cdp
-
-# Monitor and apply format changes
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Apply -Cdp
-
-# Run a queue-safe test
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
+.\Start-AutoSwitch.cmd direct
 ~~~
 
-The launchers are `Start-AutoSwitch.cmd` for normal monitoring and `Run-AutoTest.cmd` for the queue test. `Start-AutoSwitch.cmd` uses the Hi-Fi Cable/ASIO path by default; run `Start-AutoSwitch.cmd direct` to route Amazon directly to the current Windows default render endpoint for a non-ASIO test. Set the desired DAC/speakers as the Windows default before starting direct mode. Use `-Mode Probe` or `-Mode Devices` for one-shot diagnostics.
+`Run-AutoTest.cmd` is optional and runs the queue test. For one-shot diagnostics, use `-Mode Probe` or `-Mode Devices` with the PowerShell script.
 
-The project root keeps only the two launchers, configuration, and documentation. PowerShell scripts live under `scripts`; runtime state and downloaded tools are created locally in `state` and `tools`.
+When AutoTest finishes, the console prints average latency. Detailed per-track results remain in `state/auto-test-latest.json`; the aggregate is written to `state/auto-test-summary.json`.
 
-To watch the endpoint format continuously without adding another root-level launcher:
+## AutoTest
 
-~~~powershell
-.\scripts\Watch-DeviceFormat.ps1 -IntervalMs 100
-~~~
+Before running `Run-AutoTest.cmd`, sign in to Amazon Music, start playback, enable autoplay, and leave enough playable tracks after the current queue position. Do not operate Amazon Music or play another source through the same ASIO path during the test.
 
-Use `-Once` for a single reading, or `-DeviceId` with the command-line-friendly ID from `-Mode Devices`.
-
-When AutoTest finishes, the console prints average latency for successful tracks, switched tracks, and same-format tracks. Detailed per-track results remain in `state/auto-test-latest.json`; the aggregate is written to `state/auto-test-summary.json`.
-
-## AutoTest preparation
-
-AutoTest advances Amazon Music with NextTrack. Before starting:
-
-1. Open Amazon Music, sign in, and start playback.
-2. Enable autoplay/continuous playback.
-3. Prepare at least the requested number of playable tracks from the current queue position. For a 20-track test, keep 20 or more tracks available after the current position.
-4. Do not manually operate Amazon Music during the test, and do not play another audio source through the same ASIO path.
-
-If the queue runs out, AutoTest reports a next-track timeout; that is a queue/playback setup failure, not a sample-rate switch failure. Use a smaller count when needed:
-
-~~~powershell
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 5 -Cdp
-~~~
-
-CDP launch mode is used when Amazon must be started with a debugging port. A launch may open or restart Amazon Music and can reset the current queue. When an existing Amazon process and usable CDP port are found, the switcher reuses them. To avoid an unnecessary relaunch, open Amazon first and connect with -Cdp without -CdpLaunch; if no debug port is available, the script can fall back to AmazonMusic.log.
+AutoTest uses NextTrack. If the queue runs out, a next-track timeout indicates a playback setup problem, not a sample-rate switch failure. CDP launch mode may restart Amazon and reset its queue; an existing process is reused when a usable CDP port is already available.
 
 ## Configuration
 
-Edit `config.json`:
-
-- deviceId: preferred device ID from -Mode Devices; leave empty for the default render endpoint.
-- deviceNamePattern: optional wildcard fallback, such as Hi-Fi Cable Input*.
-- trackPollMilliseconds: track detection interval.
-- waitForRebuildSeconds: maximum wait for Amazon to rebuild the stream.
-- showDetailedTiming: false keeps the console concise; set true to print every timing stage. Full timing is always saved in AutoTest JSON.
-
-If using Hi-Fi Cable, route Amazon Music to Hi-Fi Cable Input and let ASIO4ALL/ASIO Bridge forward it to the hardware output.
+Most users can leave `config.json` unchanged. Advanced settings include the target endpoint (`deviceId` or `deviceNamePattern`), track polling interval, Amazon rebuild timeout, and `showDetailedTiming`.
 
 ## Audio flow
 
@@ -137,8 +101,6 @@ Amazon Music
 
 Rate Switcher ── changes bit depth and sample rate ──► selected Windows render endpoint
 ~~~
-
-Direct mode sends Amazon Music straight to the current Windows default render device; it does not require Hi-Fi Cable, ASIO Bridge, or ASIO4ALL. Use `Start-AutoSwitch.cmd direct` after setting the desired DAC/speakers as the Windows default. The default launcher uses the Hi-Fi Cable/ASIO path.
 
 ### Native ASIO vs ASIO4ALL
 
