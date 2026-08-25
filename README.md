@@ -63,19 +63,21 @@ For normal use, double-click `Start-AutoSwitch.cmd`. It starts the ASIO path:
 
 `Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC`
 
+When the ASIO launcher exits normally, it stops its ASIO Bridge process and releases the Hi-Fi Cable route.
+
 For direct output without ASIO, set the desired DAC/speakers as the Windows default, then run this from the project folder:
 
 ~~~powershell
 .\Start-AutoSwitch.cmd direct
 ~~~
 
-`Run-AutoTest.cmd` is optional and runs the queue test. For one-shot diagnostics, use `-Mode Probe` or `-Mode Devices` with the PowerShell script.
+`Run-AutoTest.cmd` is optional and runs the queue test through ASIO by default. Run `Run-AutoTest.cmd direct` for the same test through the Windows default output without ASIO. For one-shot diagnostics, use `-Mode Probe` or `-Mode Devices` with the PowerShell script.
 
 When AutoTest finishes, the console prints average latency. Detailed per-track results remain in `state/auto-test-latest.json`; the aggregate is written to `state/auto-test-summary.json`.
 
 ## AutoTest
 
-Before running `Run-AutoTest.cmd`, sign in to Amazon Music, start playback, enable autoplay, and leave enough playable tracks after the current queue position. Do not operate Amazon Music or play another source through the same ASIO path during the test.
+Before running `Run-AutoTest.cmd`, sign in to Amazon Music, start playback, enable autoplay, and leave enough playable tracks after the current queue position. Do not operate Amazon Music or play another source through the same output path during the test.
 
 AutoTest uses NextTrack. If the queue runs out, a next-track timeout indicates a playback setup problem, not a sample-rate switch failure. CDP launch mode may restart Amazon and reset its queue; an existing process is reused when a usable CDP port is already available.
 

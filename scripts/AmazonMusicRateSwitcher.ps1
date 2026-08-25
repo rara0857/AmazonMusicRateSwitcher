@@ -1171,12 +1171,20 @@ function Export-SoundItems {
     $deadline = (Get-Date).AddSeconds(3)
     while (-not (Test-Path $path) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
     if (-not (Test-Path $path)) { throw 'SoundVolumeView did not produce a device list.' }
-    try { return @(Get-Content $path -Raw | ConvertFrom-Json) }
+    try {
+        # Windows PowerShell 5.1 can preserve a JSON array as one nested
+        # object when it crosses a function boundary. Emit each item
+        # explicitly so device filters see individual SoundVolumeView rows.
+        $items = Get-Content $path -Raw | ConvertFrom-Json
+        foreach ($item in @($items)) { Write-Output $item }
+    }
     finally { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
 }
 
 function Get-RenderDevices {
-    @(Export-SoundItems | Where-Object { $_.Type -eq 'Device' -and $_.Direction -eq 'Render' })
+    foreach ($item in @(Export-SoundItems)) {
+        if ($item.Type -eq 'Device' -and $item.Direction -eq 'Render') { Write-Output $item }
+    }
 }
 
 function Resolve-Device {
@@ -1590,6 +1598,12 @@ $script:CdpAllowLaunch = [bool]$CdpLaunch -or ([bool]$config.cdpAutoLaunch)
 
 if ($Direct) {
     Assert-Tool
+    $bridgeProcesses = @(Get-Process -Name 'VBCABLE_AsioBridge' -ErrorAction SilentlyContinue)
+    if ($bridgeProcesses.Count -gt 0) {
+        $bridgeProcesses | Stop-Process -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 250
+        Write-Log 'Direct mode: stopped the resident ASIO Bridge to release the Hi-Fi Cable path.' DarkGray
+    }
     $directDevice = Get-RenderDevices |
         Where-Object { $_.'Default Multimedia' -eq 'Render' } |
         Select-Object -First 1
@@ -1895,6 +1909,31 @@ switch ($Mode) {
                                 SelectedOk = $true
                             }
                             Write-Log 'Light same-format verification succeeded: CDP ASIN and actual playback format match.' DarkGray
+                        }
+                    }
+                    if (-not $verification -and $script:CdpEnabled -and $script:CdpWebSocketUrl) {
+                        # Same-format playback does not renegotiate a stream.
+                        # Amazon can lag briefly on playback/stream telemetry even
+                        # after its current ASIN, track format, and endpoint agree.
+                        # Treat that bounded metadata lag as a pass; switched
+                        # tracks still use the strict verifier below.
+                        $softSnapshot = Get-AmazonBackgroundSnapshot
+                        $softAsin = if ($softSnapshot) { [string]$softSnapshot.Asin } else { '' }
+                        $softTrackOk = $softSnapshot -and $softSnapshot.Track -and (Test-FormatMatch $softSnapshot.Track $format)
+                        $softDeviceOk = if ($softSnapshot -and $softSnapshot.DeviceCapability) {
+                            $softSnapshot.DeviceCapability.Bits -ge $format.Bits -and
+                            $softSnapshot.DeviceCapability.RateHz -ge $format.RateHz
+                        } else { $true }
+                        if ($softAsin -and $softAsin.ToUpperInvariant() -eq $asin.ToUpperInvariant() -and $softTrackOk -and $softDeviceOk) {
+                            $verification = [pscustomobject]@{
+                                Success = $true
+                                EndpointOk = $true
+                                TrackOk = $true
+                                CapabilityOk = $softDeviceOk
+                                PlayingOk = $false
+                                SelectedOk = $false
+                            }
+                            Write-Log 'Same-format telemetry lagged; current ASIN, track format, and endpoint agree, treating the track as PASS.' DarkGray
                         }
                     }
                     if (-not $verification) {

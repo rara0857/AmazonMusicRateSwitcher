@@ -63,19 +63,21 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 `Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC`
 
+ASIO launcher 正常結束後會停止它啟動的 ASIO Bridge，並釋放 Hi-Fi Cable path。
+
 如果不想使用 ASIO，先把想用的 DAC／喇叭設成 Windows default，再在專案資料夾執行：
 
 ~~~powershell
 .\Start-AutoSwitch.cmd direct
 ~~~
 
-`Run-AutoTest.cmd` 是選用功能，用來執行 queue test。只需要單次診斷時，再使用 PowerShell script 的 `-Mode Probe` 或 `-Mode Devices`。
+`Run-AutoTest.cmd` 是選用功能，預設會透過 ASIO 執行 queue test；執行 `Run-AutoTest.cmd direct` 則會改用 Windows default output、不經 ASIO。只需要單次診斷時，再使用 PowerShell script 的 `-Mode Probe` 或 `-Mode Devices`。
 
 AutoTest 結束時，console 會顯示平均 latency；每首 track 的詳細結果保留在 `state/auto-test-latest.json`，統計結果寫入 `state/auto-test-summary.json`。
 
 ## AutoTest
 
-執行 `Run-AutoTest.cmd` 前，請先登入 Amazon Music、開始播放、開啟 autoplay，並在目前 queue 後面準備足夠的可播放 track。測試期間不要操作 Amazon Music，也不要讓同一條 ASIO path 播放其他音訊。
+執行 `Run-AutoTest.cmd` 前，請先登入 Amazon Music、開始播放、開啟 autoplay，並在目前 queue 後面準備足夠的可播放 track。測試期間不要操作 Amazon Music，也不要讓同一條 output path 播放其他音訊。
 
 AutoTest 會透過 NextTrack 播放；queue 播完時的 next-track timeout 代表播放設定不足，不代表 sample-rate switch 失敗。CDP launch mode 可能重開 Amazon 並重置 queue；若已存在可用的 CDP port，程式會沿用現有程序。
 
