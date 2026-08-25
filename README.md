@@ -73,7 +73,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
 ~~~
 
-The launchers are `Start-AutoSwitch.cmd`, `Run-AutoTest.cmd`, and `Watch-DeviceFormat.cmd`.
+The launchers are `Start-AutoSwitch.cmd` for normal monitoring and `Run-AutoTest.cmd` for the queue test. Use `-Mode Probe` or `-Mode Devices` for one-shot diagnostics.
 
 When AutoTest finishes, the console prints average latency for successful tracks, switched tracks, and same-format tracks. Detailed per-track results remain in `state/auto-test-latest.json`; the aggregate is written to `state/auto-test-summary.json`.
 

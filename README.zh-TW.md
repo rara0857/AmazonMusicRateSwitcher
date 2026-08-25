@@ -73,7 +73,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
 ~~~
 
-也可以使用 `Start-AutoSwitch.cmd`、`Run-AutoTest.cmd`、`Watch-DeviceFormat.cmd`。
+也可以使用 `Start-AutoSwitch.cmd` 啟動一般監看，或使用 `Run-AutoTest.cmd` 執行 queue test。單次查看目前格式或列出裝置時，使用 `-Mode Probe` 或 `-Mode Devices` 即可。
 
 AutoTest 結束時，console 會顯示 successful tracks、需要切換 format 的 tracks，以及 same-format tracks 的平均 latency。每首 track 的詳細結果保留在 `state/auto-test-latest.json`，統計結果寫入 `state/auto-test-summary.json`。
 
