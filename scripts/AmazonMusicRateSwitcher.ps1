@@ -19,9 +19,10 @@
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$script:ToolPath = Join-Path $PSScriptRoot 'tools\SoundVolumeView\SoundVolumeView.exe'
-$script:ConfigPath = Join-Path $PSScriptRoot 'config.json'
-$script:StateDirectory = Join-Path $PSScriptRoot 'state'
+$script:ProjectRoot = Split-Path -Parent $PSScriptRoot
+$script:ToolPath = Join-Path $script:ProjectRoot 'tools\SoundVolumeView\SoundVolumeView.exe'
+$script:ConfigPath = Join-Path $script:ProjectRoot 'config.json'
+$script:StateDirectory = Join-Path $script:ProjectRoot 'state'
 $script:BackupPath = Join-Path $script:StateDirectory 'original-device-format.dat'
 $script:StatePath = Join-Path $script:StateDirectory 'state.json'
 $script:FormatCachePath = Join-Path $script:StateDirectory 'verified-format-cache.json'

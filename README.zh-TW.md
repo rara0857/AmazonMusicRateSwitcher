@@ -49,31 +49,33 @@ Amazon Music Windows 版的 Exclusive Mode 不會依照每首 track 自動切換
 
 ~~~powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\setup.ps1
+.\scripts\setup.ps1
 ~~~
 
-`setup.ps1` 會把 SoundVolumeView 下載到專案的 `tools` 資料夾。Runtime state、播放紀錄、測試報告、device backup 與下載的第三方檔案都不會加入 Git。
+`scripts\setup.ps1` 會把 SoundVolumeView 下載到專案的 `tools` 資料夾。Runtime state、播放紀錄、測試報告、device backup 與下載的第三方檔案都不會加入 Git。
 
 ## 使用
 
 ~~~powershell
 # 讀取目前 Amazon format
-.\AmazonMusicRateSwitcher.ps1 -Mode Probe
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Probe
 
 # 列出 audio output devices
-.\AmazonMusicRateSwitcher.ps1 -Mode Devices
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Devices
 
 # 只 monitor，不切換 output format
-.\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Cdp
 
 # monitor 並套用 format switch
-.\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Apply -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Apply -Cdp
 
 # 執行 queue-safe AutoTest
-.\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
 ~~~
 
 也可以使用 `Start-AutoSwitch.cmd` 啟動一般監看，或使用 `Run-AutoTest.cmd` 執行 queue test。單次查看目前格式或列出裝置時，使用 `-Mode Probe` 或 `-Mode Devices` 即可。
+
+專案根目錄只保留兩個 launcher、設定檔與 README。PowerShell script 放在 `scripts`；`state` 和 `tools` 會在本機執行時建立或下載。
 
 AutoTest 結束時，console 會顯示 successful tracks、需要切換 format 的 tracks，以及 same-format tracks 的平均 latency。每首 track 的詳細結果保留在 `state/auto-test-latest.json`，統計結果寫入 `state/auto-test-summary.json`。
 
@@ -89,7 +91,7 @@ AutoTest 會透過 NextTrack 讓 Amazon Music 連續播放。開始前請先確�
 如果 queue 播完，AutoTest 會回報 next-track timeout；這代表 queue 或播放設定不足，不代表 sample-rate switch 失敗。可以自行降低測試數量：
 
 ~~~powershell
-.\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 5 -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 5 -Cdp
 ~~~
 
 CDP launch mode 會在需要時用 debugging port 啟動 Amazon Music。啟動過程可能會開啟或重開 Amazon Music，並重置目前的 queue。若已找到正在執行的 Amazon process 和可用的 CDP port，程式會優先沿用，不主動重開。想避免不必要的 relaunch，可以先開好 Amazon，再使用 -Cdp 而不要加 -CdpLaunch；找不到 debugging port 時，程式可以退回使用 AmazonMusic.log。
@@ -141,7 +143,7 @@ ASIO4ALL 是把 WDM device 包裝成 ASIO interface 的 compatibility layer，�
 ## 還原
 
 ~~~powershell
-.\AmazonMusicRateSwitcher.ps1 -Mode Restore
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Restore
 ~~~
 
-專案只使用相對 project path 與 `%LOCALAPPDATA%`。複製整個資料夾到另一台 Windows 電腦後，再執行一次 `setup.ps1` 即可。
+專案只使用相對 project path 與 `%LOCALAPPDATA%`。複製整個資料夾到另一台 Windows 電腦後，再執行一次 `scripts\setup.ps1` 即可。

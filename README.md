@@ -49,31 +49,33 @@ Run once from this directory:
 
 ~~~powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\setup.ps1
+.\scripts\setup.ps1
 ~~~
 
-`setup.ps1` downloads SoundVolumeView into the local `tools` folder. Runtime state, listening history, test reports, device backups, and downloaded third-party files are excluded from Git.
+`scripts\setup.ps1` downloads SoundVolumeView into the local `tools` folder. Runtime state, listening history, test reports, device backups, and downloaded third-party files are excluded from Git.
 
 ## Use
 
 ~~~powershell
 # Read the current Amazon format
-.\AmazonMusicRateSwitcher.ps1 -Mode Probe
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Probe
 
 # List render endpoints
-.\AmazonMusicRateSwitcher.ps1 -Mode Devices
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Devices
 
 # Monitor without changing the endpoint
-.\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Cdp
 
 # Monitor and apply format changes
-.\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Apply -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Monitor -Apply -Cdp
 
 # Run a queue-safe test
-.\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
 ~~~
 
 The launchers are `Start-AutoSwitch.cmd` for normal monitoring and `Run-AutoTest.cmd` for the queue test. Use `-Mode Probe` or `-Mode Devices` for one-shot diagnostics.
+
+The project root keeps only the two launchers, configuration, and documentation. PowerShell scripts live under `scripts`; runtime state and downloaded tools are created locally in `state` and `tools`.
 
 When AutoTest finishes, the console prints average latency for successful tracks, switched tracks, and same-format tracks. Detailed per-track results remain in `state/auto-test-latest.json`; the aggregate is written to `state/auto-test-summary.json`.
 
@@ -89,7 +91,7 @@ AutoTest advances Amazon Music with NextTrack. Before starting:
 If the queue runs out, AutoTest reports a next-track timeout; that is a queue/playback setup failure, not a sample-rate switch failure. Use a smaller count when needed:
 
 ~~~powershell
-.\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 5 -Cdp
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 5 -Cdp
 ~~~
 
 CDP launch mode is used when Amazon must be started with a debugging port. A launch may open or restart Amazon Music and can reset the current queue. When an existing Amazon process and usable CDP port are found, the switcher reuses them. To avoid an unnecessary relaunch, open Amazon first and connect with -Cdp without -CdpLaunch; if no debug port is available, the script can fall back to AmazonMusic.log.
@@ -141,7 +143,7 @@ If Amazon is still feeding Hi-Fi Cable through Windows shared mode, replacing AS
 ## Restore
 
 ~~~powershell
-.\AmazonMusicRateSwitcher.ps1 -Mode Restore
+.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Restore
 ~~~
 
-The project uses only relative project paths and `%LOCALAPPDATA%`; copy the folder to another Windows computer and run `setup.ps1` again.
+The project uses only relative project paths and `%LOCALAPPDATA%`; copy the folder to another Windows computer and run `scripts\setup.ps1` again.

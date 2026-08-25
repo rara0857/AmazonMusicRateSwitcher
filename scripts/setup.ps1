@@ -1,6 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 
-$toolDirectory = Join-Path $PSScriptRoot 'tools\SoundVolumeView'
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$toolDirectory = Join-Path $projectRoot 'tools\SoundVolumeView'
 $executable = Join-Path $toolDirectory 'SoundVolumeView.exe'
 
 if (Test-Path $executable) {
