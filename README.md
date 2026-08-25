@@ -77,6 +77,14 @@ The launchers are `Start-AutoSwitch.cmd` for normal monitoring and `Run-AutoTest
 
 The project root keeps only the two launchers, configuration, and documentation. PowerShell scripts live under `scripts`; runtime state and downloaded tools are created locally in `state` and `tools`.
 
+To watch the endpoint format continuously without adding another root-level launcher:
+
+~~~powershell
+.\scripts\Watch-DeviceFormat.ps1 -IntervalMs 100
+~~~
+
+Use `-Once` for a single reading, or `-DeviceId` with the command-line-friendly ID from `-Mode Devices`.
+
 When AutoTest finishes, the console prints average latency for successful tracks, switched tracks, and same-format tracks. Detailed per-track results remain in `state/auto-test-latest.json`; the aggregate is written to `state/auto-test-summary.json`.
 
 ## AutoTest preparation

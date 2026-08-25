@@ -77,6 +77,14 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 專案根目錄只保留兩個 launcher、設定檔與 README。PowerShell script 放在 `scripts`；`state` 和 `tools` 會在本機執行時建立或下載。
 
+如果要持續監看 endpoint 的 bit depth／sample rate，不需要新增根目錄 launcher：
+
+~~~powershell
+.\scripts\Watch-DeviceFormat.ps1 -IntervalMs 100
+~~~
+
+只讀一次可以加上 `-Once`；如果要指定裝置，使用 `-Mode Devices` 顯示的 command-line-friendly ID 搭配 `-DeviceId`。
+
 AutoTest 結束時，console 會顯示 successful tracks、需要切換 format 的 tracks，以及 same-format tracks 的平均 latency。每首 track 的詳細結果保留在 `state/auto-test-latest.json`，統計結果寫入 `state/auto-test-summary.json`。
 
 ## AutoTest 注意事項
