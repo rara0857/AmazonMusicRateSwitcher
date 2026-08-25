@@ -8,6 +8,8 @@
 
     [switch] $CdpLaunch,
 
+    [switch] $Direct,
+
     [string] $DeviceId,
 
     [ValidateRange(500, 5000)]
@@ -1585,6 +1587,24 @@ $script:DeviceNamePattern = [string]$config.deviceNamePattern
 $script:ShowDetailedTiming = [bool]$config.showDetailedTiming
 $script:CdpEnabled = [bool]$Cdp -or ([bool]$config.cdpEnabled)
 $script:CdpAllowLaunch = [bool]$CdpLaunch -or ([bool]$config.cdpAutoLaunch)
+
+if ($Direct) {
+    Assert-Tool
+    $directDevice = Get-RenderDevices |
+        Where-Object { $_.'Default Multimedia' -eq 'Render' } |
+        Select-Object -First 1
+    if (-not $directDevice) {
+        $directDevice = Get-RenderDevices |
+            Where-Object { $_.Default -eq 'Render' } |
+            Select-Object -First 1
+    }
+    if (-not $directDevice) {
+        throw 'Direct mode could not find the Windows default render endpoint.'
+    }
+    $DeviceId = [string]$directDevice.'Command-Line Friendly ID'
+    Invoke-SoundVolumeView /SetAppDefault $DeviceId all 'Amazon Music.exe'
+    Write-Log ("Direct mode: Amazon output routed to {0}." -f $DeviceId) Cyan
+}
 
 switch ($Mode) {
     'Probe' {

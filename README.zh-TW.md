@@ -6,9 +6,12 @@
 
 Amazon Music Windows 版的 Exclusive Mode 不會依照每首 track 自動切換 sample rate。如果所有 track 都固定使用同一個 output format，原生格式不同的 track 可能會經過 SRC。這個工具會依照 track format 切換 endpoint，目標是盡量減少不必要的轉換，但不代表一定 bit-perfect。
 
-**Audio path：Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC**
+Audio path 有兩種：
 
-在目前設定下，這條路徑等同 global ASIO path。播放 Amazon Music 時，請不要同時播放 YouTube、system sounds 或其他 audio source，避免搶占 ASIO 或 Hi-Fi Cable stream。
+- ASIO mode：`Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC`
+- Direct mode：`Amazon Music → Windows output device → DAC`
+
+預設 launcher 使用 ASIO mode，這條路徑等同 global ASIO path；請避免讓同一條 ASIO／Hi-Fi Cable path 同時播放 YouTube、system sounds 或其他 audio source。Direct mode 則會把 Amazon 送到 Windows default output device，不需要 ASIO。
 
 這是實驗性 Windows 工具，不是 Amazon 官方 API。
 
@@ -73,7 +76,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
 ~~~
 
-也可以使用 `Start-AutoSwitch.cmd` 啟動一般監看，或使用 `Run-AutoTest.cmd` 執行 queue test。單次查看目前格式或列出裝置時，使用 `-Mode Probe` 或 `-Mode Devices` 即可。
+也可以使用 `Start-AutoSwitch.cmd` 啟動一般監看，或使用 `Run-AutoTest.cmd` 執行 queue test。`Start-AutoSwitch.cmd` 預設使用 Hi-Fi Cable／ASIO path；執行 `Start-AutoSwitch.cmd direct` 則會把 Amazon 直接導向目前 Windows default render endpoint，方便測試 non-ASIO path。啟動 direct mode 前，請先把想用的 DAC／喇叭設成 Windows default。單次查看目前格式或列出裝置時，使用 `-Mode Probe` 或 `-Mode Devices` 即可。
 
 專案根目錄只保留兩個 launcher、設定檔與 README。PowerShell script 放在 `scripts`；`state` 和 `tools` 會在本機執行時建立或下載。
 
@@ -120,17 +123,22 @@ CDP launch mode 會在需要時用 debugging port 啟動 Amazon Music。啟動�
 
 ~~~text
 Amazon Music
+    ├── Direct mode ───────────────────────────────► Windows output device／DAC
     │
-    ▼
-Hi-Fi Cable Input
-    │
-    ▼
-ASIO output layer
-    ├── native hardware ASIO driver ──► DAC／audio device
-    └── ASIO4ALL WDM wrapper ─────────► DAC／audio device
+    └── ASIO mode
+            │
+            ▼
+        Hi-Fi Cable Input
+            │
+            ▼
+        ASIO output layer
+            ├── native hardware ASIO driver ──► DAC／audio device
+            └── ASIO4ALL WDM wrapper ─────────► DAC／audio device
 
-Rate Switcher ── 修改 bit depth 與 sample rate ──► Hi-Fi Cable Input
+Rate Switcher ── 修改 bit depth 與 sample rate ──► selected Windows render endpoint
 ~~~
+
+Direct mode 會把 Amazon Music 直接送到目前的 Windows default render device，不需要 Hi-Fi Cable、ASIO Bridge 或 ASIO4ALL。先把想用的 DAC／喇叭設成 Windows default，再執行 `Start-AutoSwitch.cmd direct`。一般啟動的 `Start-AutoSwitch.cmd` 則使用 Hi-Fi Cable／ASIO path。
 
 ### Native ASIO driver 與 ASIO4ALL
 

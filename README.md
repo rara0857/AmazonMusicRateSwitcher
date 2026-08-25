@@ -6,9 +6,12 @@ Automatically changes the Windows render format to match the current Amazon Musi
 
 Amazon Music's Windows Exclusive Mode does not automatically change the sample rate per track. If every track uses one fixed output format, tracks with a different native format may go through SRC. This tool follows the track format and switches the endpoint to reduce unnecessary conversion; it is not a guarantee of bit-perfect output.
 
-**Audio path：Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC**
+Audio paths:
 
-With the current setup, this is effectively a global ASIO path. Do not play YouTube, system sounds, or other audio sources at the same time; they may contend for the ASIO or Hi-Fi Cable stream.
+- ASIO mode: `Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC`
+- Direct mode: `Amazon Music → Windows output device → DAC`
+
+The default launcher uses ASIO mode, which is effectively a global ASIO path; avoid playing YouTube, system sounds, or other audio sources through the same ASIO/Hi-Fi Cable route. Direct mode sends Amazon to the Windows default output device and does not require ASIO.
 
 This is an experimental Windows helper, not an official Amazon API.
 
@@ -73,7 +76,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\AmazonMusicRateSwitcher.ps1 -Mode AutoTest -TestTracks 20 -Cdp
 ~~~
 
-The launchers are `Start-AutoSwitch.cmd` for normal monitoring and `Run-AutoTest.cmd` for the queue test. Use `-Mode Probe` or `-Mode Devices` for one-shot diagnostics.
+The launchers are `Start-AutoSwitch.cmd` for normal monitoring and `Run-AutoTest.cmd` for the queue test. `Start-AutoSwitch.cmd` uses the Hi-Fi Cable/ASIO path by default; run `Start-AutoSwitch.cmd direct` to route Amazon directly to the current Windows default render endpoint for a non-ASIO test. Set the desired DAC/speakers as the Windows default before starting direct mode. Use `-Mode Probe` or `-Mode Devices` for one-shot diagnostics.
 
 The project root keeps only the two launchers, configuration, and documentation. PowerShell scripts live under `scripts`; runtime state and downloaded tools are created locally in `state` and `tools`.
 
@@ -120,17 +123,22 @@ If using Hi-Fi Cable, route Amazon Music to Hi-Fi Cable Input and let ASIO4ALL/A
 
 ~~~text
 Amazon Music
+    ├── Direct mode ───────────────────────────────► Windows output device / DAC
     │
-    ▼
-Hi-Fi Cable Input
-    │
-    ▼
-ASIO output layer
-    ├── Native hardware ASIO driver ──► DAC / audio device
-    └── ASIO4ALL WDM wrapper ─────────► DAC / audio device
+    └── ASIO mode
+            │
+            ▼
+        Hi-Fi Cable Input
+            │
+            ▼
+        ASIO output layer
+            ├── Native hardware ASIO driver ──► DAC / audio device
+            └── ASIO4ALL WDM wrapper ─────────► DAC / audio device
 
-Rate Switcher ── changes bit depth and sample rate ──► Hi-Fi Cable Input
+Rate Switcher ── changes bit depth and sample rate ──► selected Windows render endpoint
 ~~~
+
+Direct mode sends Amazon Music straight to the current Windows default render device; it does not require Hi-Fi Cable, ASIO Bridge, or ASIO4ALL. Use `Start-AutoSwitch.cmd direct` after setting the desired DAC/speakers as the Windows default. The default launcher uses the Hi-Fi Cable/ASIO path.
 
 ### Native ASIO vs ASIO4ALL
 
