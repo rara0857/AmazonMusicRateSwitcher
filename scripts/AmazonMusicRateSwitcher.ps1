@@ -10,6 +10,14 @@
 
     [switch] $Direct,
 
+    # Returns 0 when no Monitor/AutoTest backend owns the global instance
+    # mutex, or 3 when another backend is already active.
+    [switch] $CheckInstance,
+
+    # Launchers pass their PID so a hidden watchdog can terminate this backend
+    # even when the launcher is force-closed and normal cleanup cannot run.
+    [int] $OwnerPid = 0,
+
     [string] $DeviceId,
 
     [ValidateRange(500, 5000)]
@@ -28,6 +36,88 @@ $script:StateDirectory = Join-Path $script:ProjectRoot 'state'
 $script:BackupPath = Join-Path $script:StateDirectory 'original-device-format.dat'
 $script:StatePath = Join-Path $script:StateDirectory 'state.json'
 $script:FormatCachePath = Join-Path $script:StateDirectory 'verified-format-cache.json'
+$script:InstanceMutexName = 'Global\AmazonMusicRateSwitcher.Active.v1'
+$script:InstanceMutex = $null
+$script:InstanceMutexAcquired = $false
+
+function Test-SwitcherInstanceActive {
+    $mutex = [Threading.Mutex]::new($false, $script:InstanceMutexName)
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne(0)
+        } catch [Threading.AbandonedMutexException] {
+            # Force-killed owners leave an abandoned mutex. Windows transfers
+            # it to this thread, so it is safe to release and reuse at once.
+            $acquired = $true
+        }
+        return -not $acquired
+    }
+    finally {
+        if ($acquired) {
+            try { $mutex.ReleaseMutex() } catch { }
+        }
+        $mutex.Dispose()
+    }
+}
+
+if ($CheckInstance) {
+    if (Test-SwitcherInstanceActive) {
+        [Console]::Error.WriteLine('Amazon Music Rate Switcher is already running.')
+        exit 3
+    }
+    exit 0
+}
+
+function Enter-SwitcherInstance {
+    $mutex = [Threading.Mutex]::new($false, $script:InstanceMutexName)
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne(0)
+        } catch [Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            $mutex.Dispose()
+            [Console]::Error.WriteLine('Amazon Music Rate Switcher is already running. Stop the existing session before starting another one.')
+            exit 3
+        }
+        $script:InstanceMutex = $mutex
+        $script:InstanceMutexAcquired = $true
+    }
+    catch {
+        if (-not $script:InstanceMutexAcquired) { $mutex.Dispose() }
+        throw
+    }
+}
+
+function Start-BackendOwnerWatchdog {
+    param([int] $RequestedOwnerPid)
+
+    $resolvedOwnerPid = $RequestedOwnerPid
+    if ($resolvedOwnerPid -le 0) {
+        $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+        if ($self) { $resolvedOwnerPid = [int]$self.ParentProcessId }
+    }
+    if ($resolvedOwnerPid -le 0 -or $resolvedOwnerPid -eq $PID) { return }
+
+    $owner = Get-Process -Id $resolvedOwnerPid -ErrorAction SilentlyContinue
+    if (-not $owner) { return }
+    $ownerStartTicks = 0
+    try { $ownerStartTicks = $owner.StartTime.ToUniversalTime().Ticks } catch { }
+
+    $watcherScript = Join-Path $PSScriptRoot 'Ensure-AsioBridge.ps1'
+    Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $watcherScript,
+        '-WatchParentPid', [string]$resolvedOwnerPid,
+        '-WatchParentStartTicks', [string]$ownerStartTicks,
+        '-WatchBackendPid', [string]$PID
+    ) | Out-Null
+}
+
 New-Item -ItemType Directory -Path $script:StateDirectory -Force | Out-Null
 $script:LastUnmuteIssued = $true
 $script:LastUnexpectedAsin = ''
@@ -653,9 +743,33 @@ function ConvertTo-CdpFormat {
     }
 }
 
+$script:LastGuiTrackMetadata = ''
+function Write-GuiTrackMetadata {
+    param($Snapshot, [string] $Asin)
+
+    if ($env:AMRS_GUI -ne '1' -or -not $Snapshot -or -not $Asin) { return }
+    if (([string]$Snapshot.Asin).ToUpperInvariant() -ne $Asin.ToUpperInvariant()) { return }
+
+    $metadata = [ordered]@{
+        asin = $Asin.ToUpperInvariant()
+        title = [string]$Snapshot.Title
+        artist = [string]$Snapshot.Artist
+        album = [string]$Snapshot.Album
+        artworkUrl = [string]$Snapshot.ArtworkUrl
+    }
+    $json = $metadata | ConvertTo-Json -Compress
+    if ($json -eq $script:LastGuiTrackMetadata) { return }
+    $script:LastGuiTrackMetadata = $json
+
+    # Only ASCII crosses redirected Windows PowerShell stdout. This prevents
+    # Japanese and other Unicode metadata from being replaced by question marks.
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+    [Console]::WriteLine('@@AMRS_TRACK_B64@@' + $payload)
+}
+
 function Get-AmazonCdpSnapshot {
     $expression = @'
-(()=>{const e=document.getElementById('transportContainer'),v=e&&e.__vue__,p=v&&v.$store&&v.$store.state&&v.$store.state.player,m=p&&p.model,cp=m&&m.currentPlayable,t=cp&&cp.track,a=m&&m.audioAttributes,c=m&&m.deviceCapabilities;return JSON.stringify({ready:!!t,asin:t&&t.asin||'',title:t&&t.title||'',artist:t&&t.artist&&t.artist.name||'',state:m&&m.state||'',positionMs:p&&p.progress&&p.progress.currentTime||0,track:{bits:a&&a.bestAvailableBitDepth||0,rate:a&&a.bestAvailableSampleRate||0},playing:{bits:a&&a.bitDepth||0,rate:a&&a.sampleRate||0},capability:{bits:c&&c.maxBitDepth||0,rate:c&&c.maxSampleRate||0}})})()
+(()=>{const e=document.getElementById('transportContainer'),v=e&&e.__vue__,p=v&&v.$store&&v.$store.state&&v.$store.state.player,m=p&&p.model,cp=m&&m.currentPlayable,t=cp&&cp.track,a=m&&m.audioAttributes,c=m&&m.deviceCapabilities,al=t&&t.album;return JSON.stringify({ready:!!t,asin:t&&t.asin||'',title:t&&t.title||'',artist:t&&t.artist&&t.artist.name||'',album:al&&al.name||'',artworkUrl:al&&al.image||'',state:m&&m.state||'',positionMs:p&&p.progress&&p.progress.currentTime||0,track:{bits:a&&a.bestAvailableBitDepth||0,rate:a&&a.bestAvailableSampleRate||0},playing:{bits:a&&a.bitDepth||0,rate:a&&a.sampleRate||0},capability:{bits:c&&c.maxBitDepth||0,rate:c&&c.maxSampleRate||0}})})()
 '@
     $data = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
     if (-not $data.ready) { return $null }
@@ -664,6 +778,8 @@ function Get-AmazonCdpSnapshot {
         Asin = [string]$data.asin
         Title = [string]$data.title
         Artist = [string]$data.artist
+        Album = [string]$data.album
+        ArtworkUrl = [string]$data.artworkUrl
         Track = ConvertTo-CdpFormat $data.track.bits $data.track.rate
         DeviceCapability = ConvertTo-CdpFormat $data.capability.bits $data.capability.rate
         Playing = ConvertTo-CdpFormat $data.playing.bits $data.playing.rate
@@ -1620,6 +1736,12 @@ if ($Direct) {
     Write-Log ("Direct mode: Amazon output routed to {0}." -f $DeviceId) Cyan
 }
 
+try {
+if ($Mode -in @('Monitor', 'AutoTest')) {
+    Enter-SwitcherInstance
+    Start-BackendOwnerWatchdog -RequestedOwnerPid $OwnerPid
+}
+
 switch ($Mode) {
     'Probe' {
         $snapshot = Get-AmazonBackgroundSnapshot
@@ -1753,6 +1875,10 @@ switch ($Mode) {
                     $asin = $trackMatches[$trackMatches.Count - 1].Groups['asin'].Value.ToUpperInvariant()
                 }
                 if (-not $asin) { continue }
+                # The current CDP read already happened for format monitoring.
+                # Republish only when title/album/artwork fields change, so a
+                # late artwork URL can refresh the GUI without another query.
+                Write-GuiTrackMetadata -Snapshot $cdpCurrent -Asin $asin
                 if ($asin -eq $lastAsin) { continue }
                 if ($autoTest) { $autoTestWaitingForNext = $false }
                 $lastAsin = $asin
@@ -1871,6 +1997,9 @@ switch ($Mode) {
                 $timing['TrackEventToFormatMs'] = [int]$trackTimer.ElapsedMilliseconds
 
                 Write-Log "Playback engine changed track: $asin -> $($format.Text)" Cyan
+                if ($env:AMRS_GUI -eq '1') {
+                    [Console]::WriteLine("@@AMRS_FORMAT@@$asin|$($format.Bits)|$($format.RateHz)")
+                }
                 $monitorDevice.'Default Format' = $currentEndpointFormat
                 $before = $currentEndpointFormat
                 $endpointMatches = $before -match "(?i)\b$($format.Bits) bit\b" -and $before -match "\b$($format.RateHz) Hz\b"
@@ -2071,17 +2200,28 @@ switch ($Mode) {
                 [Math]::Round([double](@($successfulSameFormatValues | Measure-Object -Average).Average), 1)
             } else { $null }
             $summaryPath = Join-Path $script:StateDirectory 'auto-test-summary.json'
-            [ordered]@{
+            $failureDetails = @($testResults | Where-Object { -not $_.Success } | ForEach-Object {
+                [ordered]@{
+                    Number = $_.Number
+                    Asin = $_.Asin
+                    Target = $_.Target
+                    Reason = $_.Reason
+                }
+            })
+            $summary = [ordered]@{
                 GeneratedAt = (Get-Date).ToString('o')
                 RequestedTracks = $TestTracks
                 CompletedTracks = $testResults.Count
                 Passed = $passed
                 Failed = $testResults.Count - $passed
+                AllPassed = ($passed -eq $testResults.Count -and $testResults.Count -eq $TestTracks)
                 AverageSuccessfulTrackMs = $averageSuccessfulTrackMs
                 AverageSuccessfulSwitchMs = $averageSuccessfulSwitchMs
                 AverageSuccessfulSameFormatMs = $averageSuccessfulSameFormatMs
+                Failures = $failureDetails
                 ResultsFile = 'auto-test-latest.json'
-            } | ConvertTo-Json | Set-Content -LiteralPath $summaryPath -Encoding utf8
+            }
+            $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
             Write-Host ''
             $testResults | Format-Table Number, Asin, Target, Success, UnmuteIssued, Reason -AutoSize
             if ($null -ne $averageSuccessfulTrackMs) {
@@ -2092,6 +2232,11 @@ switch ($Mode) {
             }
             Write-Log "AutoTest complete: $passed/$($testResults.Count) PASS; report: $reportPath" $(if($passed -eq $testResults.Count){'Green'}else{'Red'})
             Write-Log "Latency summary: $summaryPath" DarkGray
+            if ($env:AMRS_GUI -eq '1') {
+                $summaryJson = $summary | ConvertTo-Json -Depth 5 -Compress
+                $summaryPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($summaryJson))
+                [Console]::WriteLine('@@AMRS_AUTOTEST_SUMMARY_B64@@' + $summaryPayload)
+            }
             if ($passed -ne $testResults.Count) { exit 2 }
         }
     }
@@ -2103,5 +2248,14 @@ switch ($Mode) {
         $state = Get-Content $script:StatePath -Raw | ConvertFrom-Json
         Invoke-SoundVolumeView /LoadDeviceFormat ([string]$state.DeviceId) $script:BackupPath
     Write-Log "Restored $($state.DeviceId): $($state.OriginalFormat)" Green
+    }
+}
+}
+finally {
+    if ($script:InstanceMutexAcquired -and $script:InstanceMutex) {
+        try { $script:InstanceMutex.ReleaseMutex() } catch { }
+        $script:InstanceMutex.Dispose()
+        $script:InstanceMutex = $null
+        $script:InstanceMutexAcquired = $false
     }
 }

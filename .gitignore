@@ -12,3 +12,8 @@ Thumbs.db
 Desktop.ini
 .idea/
 .vscode/
+
+# Build and publish output.
+/src/AmazonMusicRateSwitcher.Gui/bin/
+/src/AmazonMusicRateSwitcher.Gui/obj/
+/artifacts/
