@@ -37,4 +37,9 @@ When the format changes, the app replays the current track, which usually adds a
 - Amazon Music updates may affect compatibility.
 - Available output devices and audio formats depend on Windows settings and audio drivers.
 
+## Credits
+
+- Parts of the UI layout and user flow were inspired by [WindowsLosslessSwitcher](https://github.com/jordanmgibson/WindowsLosslessSwitcher).
+- This project is an independent implementation for Amazon Music for Windows.
+
 For development, diagnostics, and self-build instructions, see the [development guide](docs/development.md).

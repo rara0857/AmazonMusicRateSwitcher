@@ -37,4 +37,9 @@ Amazon Music Windows 版的獨佔模式不會依照每首歌的原生音訊格�
 - Amazon Music 更新後可能影響相容性。
 - 可用的輸出裝置與音訊格式取決於 Windows 設定和音訊驅動程式。
 
+## Credits
+
+- 部分 UI 版面與使用流程參考了 [WindowsLosslessSwitcher](https://github.com/jordanmgibson/WindowsLosslessSwitcher)。
+- 本專案針對 Amazon Music for Windows 進行獨立實作。
+
 開發、診斷與自行 build 的說明請見[開發文件](docs/development.zh-TW.md)。
