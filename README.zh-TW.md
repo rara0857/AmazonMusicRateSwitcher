@@ -2,7 +2,7 @@
 
 [English](README.md) | 繁體中文
 
-Amazon Music Windows 版的 Exclusive Mode 不會跟著每首歌的原生 sample rate 自動切換。這個工具會讀取目前播放格式並切換 Windows render endpoint，盡量減少不必要的 sample-rate conversion（SRC）。這是實驗性工具，無法保證整條 audio path 一定 bit-perfect。
+Amazon Music Windows 版的獨佔模式不會依照每首歌的原生音訊格式自動調整。這個工具會偵測目前歌曲的音訊格式，並自動調整 Windows 音訊設定，減少不必要的格式轉換。
 
 <p align="center">
   <img src="assets/app-preview.png" width="220" alt="Amazon Music Rate Switcher 桌面程式">
@@ -10,66 +10,31 @@ Amazon Music Windows 版的 Exclusive Mode 不會跟著每首歌的原生 sample
 
 ## Features
 
-- 依照目前歌曲自動切換 sample rate 與 bit depth。
-- GUI 顯示歌名、歌手、封面、播放格式與切換狀態。
-- 支援 ASIO Bridge／ASIO4ALL 與 Windows Direct output。
-- Format 改變時 queue-safe 重播同一首；格式相同時不中斷播放。
-- 用 ASIN 配對 verified-format cache，加快常聽歌曲又避免套用上一首資料。
-- 內建預設 10 首的 AutoTest，輸出成功率與平均延遲。
-- 使用 OS-level single-instance lock 與 forced-close cleanup，避免 backend 殘留互搶。
+- 依照目前歌曲自動切換音訊格式。
+- 顯示歌名、歌手、封面、播放格式與切換狀態。
+- 支援 ASIO 與 Direct 兩種輸出模式。
+- 格式變更時自動重新播放目前歌曲，格式相同時不中斷播放。
+- 內建 10 首歌曲的 AutoTest，提供測試結果。
 
 ## 快速開始
 
-一般使用以 packaged EXE 為主：
+下載版程式是最簡單的使用方式：
 
-1. 從最新 GitHub Release 下載 `AmazonMusicRateSwitcher-1.0.0-win-x64-Portable.zip`。
+1. 從[最新 GitHub Release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases/latest) 下載 `AmazonMusicRateSwitcher-v1.0.0-portable.zip`。
 2. 解壓縮後執行 `AmazonMusicRateSwitcher.exe`。
-3. 按 **Start**；第一次使用會自動安裝必要的 endpoint helper。
+3. 按 **Start**。第一次使用時會自動安裝必要元件。
 
-選 **ASIO** 會走 Hi-Fi Cable；選 **Direct** 會直接使用 Windows output device。執行 AutoTest 前要先播放音樂、開啟 autoplay，並確認後面至少還有 10 首可播放歌曲。
+選 **ASIO** 會透過 Hi-Fi Cable 輸出；選 **Direct** 會使用 Windows 的一般輸出裝置。執行 AutoTest 前，請先播放音樂、開啟自動播放，並確認後面至少還有 10 首可播放歌曲。
 
-## Audio path
+## 使用提醒
 
-- ASIO：`Amazon Music → Hi-Fi Cable → ASIO driver/ASIO4ALL → DAC`
-- Direct：`Amazon Music → Windows output device → DAC`
+使用 ASIO 時，其他程式的聲音可能會共用同一個 Hi-Fi Cable。播放期間請避免讓 YouTube、系統音效或其他音訊來源使用同一個裝置。
 
-ASIO mode 是 global route；播放音樂時不要讓 YouTube、system sounds 或其他 audio source 同時走同一條 Hi-Fi Cable。有原廠 native ASIO driver 時應優先使用；ASIO4ALL 是 WDM compatibility layer，本身不代表一定 bit-perfect。
+格式變更時會重新播放目前歌曲，通常增加約 0.5～1.5 秒；格式相同時不會中斷播放。
 
-```text
-Amazon Music
-   ├─ Direct ──► Windows render endpoint ──► DAC
-   └─ ASIO ────► Hi-Fi Cable ──► ASIO driver/ASIO4ALL ──► DAC
+## 注意事項
 
-Rate Switcher ──► 切換所選 endpoint format
-```
+- Amazon Music 更新後可能影響相容性。
+- 可用的輸出裝置與音訊格式取決於 Windows 設定和音訊驅動程式。
 
-## 運作方式
-
-程式優先讀取 Amazon CDP player state，再使用以 ASIN 配對的 `AmazonMusic.log` 與本機 verified-format cache。需要切換時會先 mute endpoint、套用目標 format，將目前歌曲 seek 到 Amazon 的 restart threshold 後，用有保護機制的 Previous command 重播同一首歌。一次切換通常會增加約 0.5～1.5 秒。
-
-## 進階使用
-
-一般使用建議直接開 GUI。CMD launcher 與 PowerShell backend 保留給診斷使用：
-
-```powershell
-.\Start-AutoSwitch.cmd direct
-.\Run-AutoTest.cmd direct
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Devices
-.\scripts\AmazonMusicRateSwitcher.ps1 -Mode Probe
-```
-
-Runtime state、聆聽紀錄產生的 cache、測試報告、build output 和下載的第三方工具都不會加入 Git。Repository 只把可維護的 GUI source 放在 `src`、backend 放在 `scripts`，本機 build 放在 `artifacts`。
-
-若要自行 build self-contained EXE，安裝 .NET 6 Windows Desktop SDK 後執行：
-
-```powershell
-dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true -o .\artifacts\win-x64
-```
-
-測試環境：Windows 11 64 位元（build 26200）、Amazon Music Store package 9.5.2.0／executable 9.5.2.2478、PowerShell 5.1、VB-Audio Hi-Fi Cable 與 ASIO4ALL。
-
-## 限制
-
-- Amazon 更新後可能改變 private CDP／player structure。
-- Windows shared mode 仍可能 mix 或 process audio；endpoint format 正確不代表整條 path 一定 bit-perfect。
-- Device name 與可用格式取決於目前 Windows 安裝環境和 audio driver。
+開發、診斷與自行 build 的說明請見[開發文件](docs/development.zh-TW.md)。
