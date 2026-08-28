@@ -11,6 +11,10 @@ Rate Switcher reads the track format and switches automatically to minimize unne
   <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Changer desktop app">
 </p>
 
+<p align="center">
+  <img src="assets/process.gif?v=20260828" width="640" alt="Amazon Music Rate Switcher in operation">
+</p>
+
 ## Features
 
 - Automatic bit-depth and sample-rate switching per track.
