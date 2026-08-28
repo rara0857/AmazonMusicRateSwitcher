@@ -41,7 +41,7 @@ Before testing, start playback and leave at least 10 playable tracks in the queu
 ## Notes
 
 - A format change usually adds about 0.5–2 seconds; same-format tracks start immediately.
-- When CDP/debug mode is enabled, the app may close and reopen the Amazon Music window once to connect to playback telemetry.
+- When CDP/debug mode is enabled, the app may close and reopen the Amazon Music window once to establish the control connection.
 - Tested on Windows 11 x64 with Amazon Music for Windows 9.5.2.0.
 
 ## Credit
