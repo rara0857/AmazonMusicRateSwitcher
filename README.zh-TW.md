@@ -42,7 +42,7 @@ flowchart LR
 ## 注意事項
 
 - 格式變更通常會增加約 0.5～2 秒；同格式歌曲會立即開始。
-- 啟用 CDP／Debug mode 時，程式可能會先關閉再重新開啟 Amazon Music 視窗一次，以連接播放 telemetry。
+- 啟用 CDP／Debug mode 時，程式可能會先關閉再重新開啟 Amazon Music 視窗一次，以建立控制連線。
 - 測試環境：Windows 11 x64、Amazon Music for Windows 9.5.2.0。
 
 ## Credit
