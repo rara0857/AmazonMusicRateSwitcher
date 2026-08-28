@@ -29,20 +29,19 @@ flowchart LR
   D --> E[DAC]
 ```
 
-Select the physical DAC in the ASIO Bridge/ASIO4ALL panel. The app does not select a Windows Output Device.
-
 ## Quick start
 
 1. Install [VB-Audio Hi-Fi CABLE & ASIO Bridge](https://vb-audio.com/Cable/).
 2. Install a DAC ASIO driver or [ASIO4ALL](https://asio4all.org/about/download-asio4all/).
-3. Download the portable release and run `AmazonMusicRateSwitcher.exe`.
-4. Select the ASIO driver in Hi-Fi CABLE, then click **START**.
+3. Download the [latest release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases) and run `AmazonMusicRateSwitcher.exe`.
+4. Select the ASIO driver in ASIO Bridge, then click **START**.
 
 Before testing, start playback and leave at least 10 playable tracks in the queue.
 
 ## Notes
 
 - A format change usually adds about 0.5–2 seconds; same-format tracks start immediately.
+- When CDP/debug mode is enabled, the app may close and reopen the Amazon Music window once to connect to playback telemetry.
 - Tested on Windows 11 x64 with Amazon Music for Windows 9.5.2.0.
 
 ## Credit

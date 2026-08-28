@@ -2,10 +2,11 @@
 
 [English](README.md) | 繁體中文
 
-Amazon Music Windows 版內建的獨佔模式不會依照歌曲的 sample rate 變更 DAC 輸出。
+Amazon Music Windows 版內建的獨佔模式不會依照歌曲的 sample rate/bit depth變更 DAC 輸出格式。
+
 Rate Switcher 會讀取歌曲格式並自動切換，盡量減少不必要的 SRC。
 
-**Audio path：** Amazon Music Exclusive → Hi-Fi Cable → ASIO Bridge → DAC
+**Audio path： Amazon Music Exclusive → Hi-Fi Cable → ASIO Bridge → DAC**
 
 <p align="center">
   <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Changer 桌面程式">
@@ -29,20 +30,19 @@ flowchart LR
   D --> E[DAC]
 ```
 
-Physical DAC 請在 ASIO Bridge／ASIO4ALL panel 內選擇。本工具不會選 Windows Output Device。
-
 ## 快速開始
 
 1. 安裝 [VB-Audio Hi-Fi CABLE & ASIO Bridge](https://vb-audio.com/Cable/)
 2. 安裝 DAC ASIO Driver 或 [ASIO4ALL](https://asio4all.org/about/download-asio4all/)。
-3. 下載 portable release，執行 `AmazonMusicRateSwitcher.exe`。
-4. 在 Hi-Fi CABLE 選好 ASIO Driver，按 **START**。
+3. 下載 [latest release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases)，執行 `AmazonMusicRateSwitcher.exe`。
+4. 在 ASIO Bridge 選好 ASIO Driver，按 **START**。
 
 執行 Test 前，請先開始播放，並確認 queue 後面至少還有 10 首可播放歌曲。
 
 ## 注意事項
 
 - 格式變更通常會增加約 0.5～2 秒；同格式歌曲會立即開始。
+- 啟用 CDP／Debug mode 時，程式可能會先關閉再重新開啟 Amazon Music 視窗一次，以連接播放 telemetry。
 - 測試環境：Windows 11 x64、Amazon Music for Windows 9.5.2.0。
 
 ## Credit
