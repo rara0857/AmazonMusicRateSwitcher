@@ -3,12 +3,16 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net6.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Keep one stable layout while the borderless window is moved between
+         monitors with different scaling. The app still applies its 150% cap
+         once at startup; Windows will not rescale the controls mid-session. -->
+    <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>AmazonMusicRateSwitcher</AssemblyName>
     <RootNamespace>AmazonMusicRateSwitcher.Gui</RootNamespace>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
   </PropertyGroup>
 </Project>

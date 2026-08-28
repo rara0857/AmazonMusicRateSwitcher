@@ -13,6 +13,9 @@ Desktop.ini
 .idea/
 .vscode/
 
+# Local screenshot backups; keep the canonical README preview above.
+/assets/*_old.png
+
 # Build and publish output.
 /src/AmazonMusicRateSwitcher.Gui/bin/
 /src/AmazonMusicRateSwitcher.Gui/obj/

@@ -2,44 +2,52 @@
 
 English | [繁體中文](README.zh-TW.md)
 
-Amazon Music for Windows does not automatically follow each track's original audio format in Exclusive Mode. This tool detects the current track's audio format and adjusts the Windows audio settings to reduce unnecessary format conversion. 
+Amazon Music's built-in Exclusive mode does not change the DAC output according to each song's sample rate.
+Rate Switcher reads the track format and switches automatically to minimize unnecessary SRC.
+
+**Audio path:** Amazon Music Exclusive → Hi-Fi Cable → ASIO Bridge → DAC
 
 <p align="center">
-  <img src="assets/app-preview.png" width="220" alt="Amazon Music Rate Switcher desktop app">
+  <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Changer desktop app">
 </p>
 
 ## Features
 
-- Automatically adjusts the audio format for the current track.
-- Shows the track title, artist, artwork, format, and switching status.
-- Supports ASIO and Direct output modes.
-- Replays the current track when the format changes and keeps playback uninterrupted when it does not.
-- Includes a 10-track AutoTest with test results.
+- Automatic bit-depth and sample-rate switching per track.
+- Amazon WASAPI Exclusive on Hi-Fi Cable.
+- Native ASIO driver or ASIO4ALL through ASIO Bridge.
+- GUI track title, artist, artwork, format, and switch status.
+
+## Output path
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "22px"}}}%%
+flowchart LR
+  A[Amazon Music<br/>Exclusive] --> B[Hi-Fi Cable]
+  B --> C[ASIO Bridge]
+  C --> D[ASIO Driver<br/>or ASIO4ALL]
+  D --> E[DAC]
+```
+
+Select the physical DAC in the ASIO Bridge/ASIO4ALL panel. The app does not select a Windows Output Device.
 
 ## Quick start
 
-The packaged app is the easiest way to get started:
+1. Install [VB-Audio Hi-Fi CABLE & ASIO Bridge](https://vb-audio.com/Cable/).
+2. Install a DAC ASIO driver or [ASIO4ALL](https://asio4all.org/about/download-asio4all/).
+3. Download the portable release and run `AmazonMusicRateSwitcher.exe`.
+4. Select the ASIO driver in Hi-Fi CABLE, then click **START**.
 
-1. Download `AmazonMusicRateSwitcher-v1.0.0-portable.zip` from the [latest GitHub Release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases/latest).
-2. Extract it and run `AmazonMusicRateSwitcher.exe`.
-3. Select **Start**. Required components are installed automatically on first use.
-
-Choose **ASIO** to use Hi-Fi Cable output, or **Direct** to use the regular Windows output device. Before running AutoTest, start playback, enable autoplay, and make sure at least 10 playable tracks remain.
-
-## Usage note
-
-With ASIO, other programs may share the same Hi-Fi Cable. Avoid sending YouTube, system sounds, or other audio sources through the same device while listening.
-
-When the format changes, the app replays the current track, which usually adds about 0.5–1.5 seconds. Tracks with the same format continue without interruption.
+Before testing, start playback and leave at least 10 playable tracks in the queue.
 
 ## Notes
 
-- Amazon Music updates may affect compatibility.
-- Available output devices and audio formats depend on Windows settings and audio drivers.
+- A format change usually adds about 0.5–2 seconds; same-format tracks start immediately.
+- Tested on Windows 11 x64 with Amazon Music for Windows 9.5.2.0.
 
-## Credits
+## Credit
 
-- Parts of the UI layout and user flow were inspired by [WindowsLosslessSwitcher](https://github.com/jordanmgibson/WindowsLosslessSwitcher).
+- Some UI layout and workflow details were inspired by [WindowsLosslessSwitcher](https://github.com/jordanmgibson/WindowsLosslessSwitcher).
 - This project is an independent implementation for Amazon Music for Windows.
 
-For development, diagnostics, and self-build instructions, see the [development guide](docs/development.md).
+See the [development guide](docs/development.md) for self-build instructions.

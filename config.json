@@ -3,7 +3,7 @@
   "deviceNamePattern": "Hi-Fi Cable Input*",
   "channels": 2,
   "trackPollMilliseconds": 50,
-  "muteDuringSwitch": true,
+  "muteDuringSwitch": false,
   "waitForRebuildSeconds": 5,
   "restartDelayMs": 2000,
   "recoveryWaitSeconds": 7,

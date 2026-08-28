@@ -10,6 +10,17 @@
 
     [switch] $Direct,
 
+    # Direct output plus Amazon's native WASAPI exclusive mode. The endpoint
+    # format is still selected by this switcher because Amazon does not follow
+    # each track's sample rate on its own.
+    [switch] $Exclusive,
+
+    # Experimental: keep the Hi-Fi Cable -> ASIO Bridge path, but ask Amazon
+    # to open the virtual Hi-Fi Cable Input in its own WASAPI Exclusive mode.
+    # This is deliberately separate from -Exclusive, which targets a physical
+    # Direct output endpoint and releases the ASIO Bridge.
+    [switch] $AsioExclusive,
+
     # Returns 0 when no Monitor/AutoTest backend owns the global instance
     # mutex, or 3 when another backend is already active.
     [switch] $CheckInstance,
@@ -36,6 +47,7 @@ $script:StateDirectory = Join-Path $script:ProjectRoot 'state'
 $script:BackupPath = Join-Path $script:StateDirectory 'original-device-format.dat'
 $script:StatePath = Join-Path $script:StateDirectory 'state.json'
 $script:FormatCachePath = Join-Path $script:StateDirectory 'verified-format-cache.json'
+$script:AsioCableDeviceId = 'VB-Audio Hi-Fi Cable\Device\Hi-Fi Cable Input\Render'
 $script:InstanceMutexName = 'Global\AmazonMusicRateSwitcher.Active.v1'
 $script:InstanceMutex = $null
 $script:InstanceMutexAcquired = $false
@@ -119,7 +131,6 @@ function Start-BackendOwnerWatchdog {
 }
 
 New-Item -ItemType Directory -Path $script:StateDirectory -Force | Out-Null
-$script:LastUnmuteIssued = $true
 $script:LastUnexpectedAsin = ''
 $script:LastResyncSuccess = $false
 $script:LastResyncTarget = ''
@@ -131,6 +142,8 @@ $script:CdpLastError = ''
 $script:CdpWasRelaunched = $false
 $script:CdpFailureLogged = $false
 $script:CdpLaunchAttempted = $false
+$script:AsioExclusiveMode = [bool]$AsioExclusive
+$script:ExclusiveMode = [bool]($Exclusive -or $AsioExclusive)
 $script:DeviceNamePattern = ''
 $script:ShowDetailedTiming = $false
 $script:AmazonLogPath = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Packages\AmazonMobileLLC.AmazonMusic_*\LocalCache\Local\Amazon Music\Logs\AmazonMusic.log') -ErrorAction SilentlyContinue |
@@ -265,17 +278,16 @@ public static class AmazonMediaCommands
         PostMessage(mainWindow, 0x0319, mainWindow, new IntPtr(14 << 16));
     }
 
-    public static void RestartCurrentTrack(IntPtr mainWindow)
-    {
-        // WM_APPCOMMAND / APPCOMMAND_MEDIA_PREVIOUSTRACK. When playback is a few
-        // seconds into a song Amazon treats this as restart-current, not skip-back.
-        PostMessage(mainWindow, 0x0319, mainWindow, new IntPtr(12 << 16));
-    }
-
     public static void NextTrack(IntPtr mainWindow)
     {
         // WM_APPCOMMAND / APPCOMMAND_MEDIA_NEXTTRACK
         PostMessage(mainWindow, 0x0319, mainWindow, new IntPtr(11 << 16));
+    }
+
+    public static void PreviousTrack(IntPtr mainWindow)
+    {
+        // WM_APPCOMMAND / APPCOMMAND_MEDIA_PREVIOUSTRACK
+        PostMessage(mainWindow, 0x0319, mainWindow, new IntPtr(12 << 16));
     }
 
 }
@@ -693,7 +705,7 @@ function Initialize-AmazonCdp {
                 if ($state.app -or $state.transport) {
                     $script:CdpPort = $port
                     $script:CdpWebSocketUrl = $url
-                    Write-Log "CDP connected on port $port; queue-safe same-track replay is enabled." Green
+                    Write-Log "CDP connected on port $port; direct track/sample-rate switching is enabled." Green
                     return $true
                 }
             } catch {
@@ -790,26 +802,231 @@ function Get-AmazonCdpSnapshot {
     }
 }
 
+function Set-AmazonCdpOutputMode {
+    param(
+        [Parameter(Mandatory)] [bool] $EnableExclusive,
+        [Parameter(Mandatory)] [string] $AmazonDeviceId,
+        [switch] $ForceExclusiveCycle,
+        [switch] $ForceOutputCycle,
+        [string] $OutputCycleIntermediateId = 'default',
+        [int] $TimeoutMilliseconds = 1800
+    )
+
+    if (-not $script:CdpEnabled) {
+        return [pscustomobject]@{ Success=$false; Pending=$false; Exclusive=$false; Device=''; Reason='CDP is unavailable' }
+    }
+    if (-not $script:CdpWebSocketUrl -and -not (Initialize-AmazonCdp)) {
+        return [pscustomobject]@{ Success=$false; Pending=$false; Exclusive=$false; Device=''; Reason=$script:CdpLastError }
+    }
+
+    $deviceJson = ConvertTo-Json $AmazonDeviceId -Compress
+    $enabledJson = if ($EnableExclusive) { 'true' } else { 'false' }
+    $forceJson = if ($ForceExclusiveCycle) { 'true' } else { 'false' }
+    $forceOutputJson = if ($ForceOutputCycle) { 'true' } else { 'false' }
+    $intermediateJson = ConvertTo-Json $OutputCycleIntermediateId -Compress
+    $expression = @"
+(async()=>{
+  const desiredDevice=$deviceJson,enableExclusive=$enabledJson,forceCycle=$forceJson,forceOutputCycle=$forceOutputJson,cycleDevice=$intermediateJson,timeout=$TimeoutMilliseconds;
+  const root=()=>document.getElementById('transportContainer')&&document.getElementById('transportContainer').__vue__;
+  const outputControl=()=>{
+    const transport=root(),base=transport&&(transport.`$root||transport),seen=new Set();let found=null;
+    const walk=v=>{if(!v||seen.has(v)||found)return;seen.add(v);if(typeof v.setOutputDevice==='function'&&Array.isArray(v.deviceList)){found=v;return}(v.`$children||[]).forEach(walk)};
+    walk(base);return found;
+  };
+  const read=()=>{
+    const v=root(),p=v&&v.`$store&&v.`$store.state&&v.`$store.state.player,m=p&&p.model,o=m&&m.outputDeviceAttributes,t=m&&m.currentPlayable&&m.currentPlayable.track;
+    return {ready:!!v,hasTrack:!!t,device:o&&o.currentDevice&&String(o.currentDevice.id||'')||'',deviceName:o&&o.currentDevice&&String(o.currentDevice.displayName||'')||'',exclusive:!!(o&&o.exclusiveMode)};
+  };
+  const wait=async predicate=>{const deadline=Date.now()+timeout;let state=read();while(Date.now()<deadline&&!predicate(state)){await new Promise(r=>setTimeout(r,10));state=read()}return state};
+  const selectDevice=async id=>{const ctl=outputControl();if(ctl){await Promise.resolve(ctl.setOutputDevice(id));return true}if(window.Native&&window.Native.Player&&typeof window.Native.Player.setOutputDevice==='function'){await Promise.resolve(window.Native.Player.setOutputDevice(id));return true}return false};
+  const selectExclusive=async enabled=>{const ctl=outputControl();if(ctl&&typeof ctl.toggleExclusiveMode==='function'){if(read().exclusive!==enabled)await Promise.resolve(ctl.toggleExclusiveMode());return true}if(window.Native&&window.Native.Player&&typeof window.Native.Player.setExclusiveMode==='function'){await Promise.resolve(window.Native.Player.setExclusiveMode(enabled));return true}return false};
+  const selectAndWait=async id=>{
+    let state=read();
+    if(state.device===id)return state;
+    for(let attempt=0;attempt<2;attempt++){
+      if(!await selectDevice(id))return state;
+      state=await wait(s=>s.device===id);
+      if(state.device===id)return state;
+      await new Promise(r=>setTimeout(r,50));
+      state=read();
+    }
+    return state;
+  };
+  if(!root()||(!outputControl()&&(!window.Native||!window.Native.Player||typeof window.Native.Player.setOutputDevice!=='function')))
+    return JSON.stringify({ok:false,pending:false,reason:'Amazon output controls are unavailable',state:read()});
+  let state=read();
+  if(state.exclusive&&(forceCycle||forceOutputCycle||!enableExclusive||state.device!==desiredDevice)){
+    if(!await selectExclusive(false))return JSON.stringify({ok:false,pending:false,reason:'Amazon Exclusive control is unavailable',state});
+    state=await wait(s=>!s.exclusive);
+  }
+  if(desiredDevice&&forceOutputCycle&&cycleDevice&&desiredDevice!==cycleDevice){
+    state=await selectAndWait(cycleDevice);
+    if(state.device!==cycleDevice)
+      return JSON.stringify({ok:false,pending:false,reason:'Amazon did not switch to the temporary output device',state});
+    state=await selectAndWait(desiredDevice);
+    if(state.device!==desiredDevice)
+      return JSON.stringify({ok:false,pending:false,reason:'Amazon did not return to the requested output device',state});
+  } else if(desiredDevice&&state.device!==desiredDevice){
+    state=await selectAndWait(desiredDevice);
+    if(state.device!==desiredDevice)
+      return JSON.stringify({ok:false,pending:false,reason:'Amazon did not select the requested output device',state});
+  }
+  if(!enableExclusive)
+    return JSON.stringify({ok:!state.exclusive,pending:false,reason:state.exclusive?'Amazon did not release exclusive mode':'',state});
+  if(!state.hasTrack)
+    return JSON.stringify({ok:false,pending:true,reason:'Exclusive mode will be armed when playback starts',state});
+  if(!state.exclusive){
+    if(!await selectExclusive(true))return JSON.stringify({ok:false,pending:false,reason:'Amazon Exclusive control is unavailable',state});
+    state=await wait(s=>s.exclusive);
+  }
+  return JSON.stringify({ok:state.exclusive,pending:false,reason:state.exclusive?'':'Amazon rejected exclusive mode and fell back to shared mode',state});
+})()
+"@
+
+    try {
+        $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
+        $state = $result.state
+        $output = [pscustomobject]@{
+            Success = [bool]$result.ok
+            Pending = [bool]$result.pending
+            Exclusive = [bool]$state.exclusive
+            Device = [string]$state.deviceName
+            Reason = [string]$result.reason
+        }
+        if ($env:AMRS_GUI -eq '1') {
+            [Console]::WriteLine('@@AMRS_EXCLUSIVE@@' + $(if ($output.Exclusive) { 'ON' } else { 'OFF' }))
+        }
+        return $output
+    }
+    catch {
+        return [pscustomobject]@{ Success=$false; Pending=$false; Exclusive=$false; Device=''; Reason=$_.Exception.Message }
+    }
+}
+
+function Refresh-AmazonOutputStream {
+     param(
+         [Parameter(Mandatory)] [string] $AmazonDeviceId
+     )
+
+     if (-not ($script:CdpEnabled -and $script:CdpWebSocketUrl)) {
+         return [pscustomobject]@{ Success=$true; Skipped=$true; Reason='' }
+     }
+
+     # Amazon can keep its existing audio client alive after the Windows
+     # endpoint format changes.  Selecting a genuinely different endpoint and
+     # immediately returning to the requested one asks Amazon's own output
+     # control to create a fresh client, which is what makes the physical DAC
+     # lock to the new sample rate.  This is intentionally a best-effort step:
+     # a failed device refresh must never turn a valid track switch into a
+     # queue failure.
+     $intermediateId = ''
+     $intermediateName = ''
+     try {
+         $decodedDevices = @(Invoke-AmazonCdpExpression -Expression @'
+(()=>{const e=document.getElementById('transportContainer'),v=e&&e.__vue__,p=v&&v.$store&&v.$store.state&&v.$store.state.player,m=p&&p.model,o=m&&m.outputDeviceAttributes,ds=o&&o.devices||[];return JSON.stringify(ds.map(x=>({id:x.id||'',name:x.displayName||''})))})()
+'@ | ConvertFrom-Json)
+         # Windows PowerShell 5.1 can keep a JSON root array as one nested
+         # object when it crosses a pipeline. Flatten that shape before looking
+         # up the cable endpoint; otherwise [string]$cable.Id becomes a list of
+         # every device ID and Amazon silently keeps the old stream.
+         $devices = if ($decodedDevices.Count -eq 1 -and $decodedDevices[0] -is [Array]) {
+             @($decodedDevices[0])
+         } else {
+             @($decodedDevices)
+         }
+         $cable = $devices | Where-Object {
+             [string]$_.Name -match '(?i)Hi-Fi Cable Input' -and [string]$_.Id -ne $AmazonDeviceId
+         } | Select-Object -First 1
+         if ($cable) {
+             $intermediateId = [string]$cable.Id
+             $intermediateName = [string]$cable.Name
+         } else {
+             $fallback = $devices | Where-Object {
+                 [string]$_.Id -and [string]$_.Id -ne 'default' -and [string]$_.Id -ne $AmazonDeviceId
+             } | Select-Object -First 1
+             if ($fallback) {
+                 $intermediateId = [string]$fallback.Id
+                 $intermediateName = [string]$fallback.Name
+             }
+         }
+     } catch {
+         return [pscustomobject]@{ Success=$false; Skipped=$false; Reason=$_.Exception.Message }
+     }
+     if (-not $intermediateId) {
+         return [pscustomobject]@{ Success=$false; Skipped=$false; Reason='Amazon did not expose a second output endpoint' }
+     }
+
+     $deviceJson = ConvertTo-Json $AmazonDeviceId -Compress
+     $intermediateJson = ConvertTo-Json $intermediateId -Compress
+     $exclusiveJson = if ($script:ExclusiveMode) { 'true' } else { 'false' }
+     # Do not require the Vue store's currentDevice field to change between
+     # the two calls. During an audio-client teardown that field can lag even
+     # though setOutputDevice has already been accepted by Amazon. The actual
+     # device calls are the important part for the DAC; read-back is diagnostic.
+     $expression = @"
+(async()=>{
+  const target=$deviceJson,temporary=$intermediateJson,exclusive=$exclusiveJson;
+  const e=document.getElementById('transportContainer'),v=e&&e.__vue__,root=v&&v.`$root||v;
+  const findControl=()=>{const seen=new Set();let found=null;const walk=x=>{if(!x||seen.has(x)||found)return;seen.add(x);if(typeof x.setOutputDevice==='function'&&Array.isArray(x.deviceList)){found=x;return}(x.`$children||[]).forEach(walk)};walk(root);return found};
+  const p=v&&v.`$store&&v.`$store.state&&v.`$store.state.player,m=p&&p.model;
+  const read=()=>{const o=m&&m.outputDeviceAttributes;return {device:o&&o.currentDevice&&String(o.currentDevice.id||'')||'',deviceName:o&&o.currentDevice&&String(o.currentDevice.displayName||'')||'',exclusive:!!(o&&o.exclusiveMode)}};
+  const delay=ms=>new Promise(r=>setTimeout(r,ms));
+  const errors=[];let method='';
+  const select=async id=>{if(!id){errors.push('empty endpoint id');return false}let last='';for(let attempt=0;attempt<30;attempt++){try{const c=findControl();const listed=c&&Array.isArray(c.deviceList)&&c.deviceList.some(d=>String(d&&d.id||'')===id);if(c){if(listed){await Promise.resolve(c.setOutputDevice(id));method='vue';return true}last='endpoint is not listed yet'}else if(window.Native&&window.Native.Player&&typeof window.Native.Player.setOutputDevice==='function'){await Promise.resolve(window.Native.Player.setOutputDevice(id));method='native';return true}else{last='setOutputDevice unavailable'}}catch(e){last=String(e&&e.message||e)}await delay(50)}errors.push(last||'setOutputDevice unavailable');return false};
+  const toggle=async()=>{let last='';for(let attempt=0;attempt<24;attempt++){try{const c=findControl();if(c&&typeof c.toggleExclusiveMode==='function'){await Promise.resolve(c.toggleExclusiveMode());return true}if(window.Native&&window.Native.Player&&typeof window.Native.Player.setExclusiveMode==='function'){await Promise.resolve(window.Native.Player.setExclusiveMode(!read().exclusive));return true}last='exclusive control unavailable'}catch(e){last=String(e&&e.message||e)}await delay(50)}errors.push(last||'exclusive control unavailable');return false};
+  if(!findControl()&&!(window.Native&&window.Native.Player&&typeof window.Native.Player.setOutputDevice==='function'))return JSON.stringify({ok:false,reason:'Amazon output controls are unavailable',before:read(),after:read()});
+  const before=read();let ok=true;
+  if(exclusive&&before.exclusive){ok=await toggle()&&ok;await delay(45)}
+  ok=await select(temporary)&&ok;await delay(75);
+  ok=await select(target)&&ok;await delay(75);
+  if(exclusive&&before.exclusive){ok=await toggle()&&ok;await delay(45)}
+  return JSON.stringify({ok,requested:ok,method,reason:errors.join('; '),before,after:read()});
+})()
+"@
+     try {
+         $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
+         if (-not $result.ok) {
+             # A stream rebuild can briefly hide the Vue output control. Retry
+             # once after the renderer has had one scheduling turn.
+             Start-Sleep -Milliseconds 220
+             $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
+         }
+     } catch {
+         return [pscustomobject]@{ Success=$false; Skipped=$false; Reason=$_.Exception.Message }
+     }
+     if (-not $result.ok) {
+         return [pscustomobject]@{ Success=$false; Skipped=$false; Reason=([string]$result.reason) }
+     }
+     $finalName = [string]$result.after.deviceName
+     return [pscustomobject]@{
+         Success=$true; Skipped=$false; Reason=''; Intermediate=$intermediateName; Device=$finalName; Method=[string]$result.method
+     }
+ }
+
 function Wait-AmazonCdpSettledTrackFormat {
     param(
         [Parameter(Mandatory)] [string] $Asin,
-        [int] $TimeoutMilliseconds = 500
+        [int] $TimeoutMilliseconds = 500,
+        [switch] $AllowPaused
     )
 
     # currentPlayable changes before audioAttributes.  The player's first
-    # positive progress update is emitted only after the fresh attributes have
-    # been committed (measured on this Amazon build: ASIN about 73 ms, attributes
-    # about 198 ms, progress about 238 ms).  Wait inside the renderer in one CDP
+    # positive progress update is a useful freshness signal while playback is
+    # running (measured on this Amazon build: ASIN about 73 ms, attributes about
+    # 198 ms, progress about 238 ms). During our defensive paused switch,
+    # progress cannot advance, so ASIN plus fully populated audioAttributes is
+    # the completion signal instead. Wait inside the renderer in one CDP
     # request: repeated PowerShell -> websocket round trips cost ~100 ms each.
     $asinJson = ConvertTo-Json $Asin.ToUpperInvariant() -Compress
+    $allowPausedJson = if ($AllowPaused) { 'true' } else { 'false' }
     $expression = @"
 (async()=>{
-  const expected=$asinJson,deadline=Date.now()+$TimeoutMilliseconds;
+  const expected=$asinJson,allowPaused=$allowPausedJson,deadline=Date.now()+$TimeoutMilliseconds;
   while(Date.now()<deadline){
     const v=document.getElementById('transportContainer')&&document.getElementById('transportContainer').__vue__;
     const p=v&&v.`$store&&v.`$store.state&&v.`$store.state.player,m=p&&p.model,cp=m&&m.currentPlayable,t=cp&&cp.track,a=m&&m.audioAttributes;
     const position=p&&p.progress&&p.progress.currentTime||0;
-    if(t&&String(t.asin||'').toUpperCase()===expected&&position>0&&a&&a.bestAvailableBitDepth>0&&a.bestAvailableSampleRate>0&&a.bitDepth>0&&a.sampleRate>0)
+    if(t&&String(t.asin||'').toUpperCase()===expected&&(allowPaused||position>0)&&a&&a.bestAvailableBitDepth>0&&a.bestAvailableSampleRate>0&&a.bitDepth>0&&a.sampleRate>0)
       return JSON.stringify({ok:true,bits:a.bestAvailableBitDepth,rate:a.bestAvailableSampleRate});
     await new Promise(r=>setTimeout(r,10));
   }
@@ -835,64 +1052,403 @@ function Invoke-AmazonCdpNextTrack {
 
 function Invoke-AmazonCdpFastRestartCurrentTrack {
     param([Parameter(Mandatory)] [string] $ExpectedAsin)
+
+    if (-not ($script:CdpEnabled -and $script:CdpWebSocketUrl)) {
+        return [pscustomobject]@{
+            Success=$false; Mode=''; SoughtMs=0; PositionMs=0; BeforePositionMs=0
+            Reason='CDP is unavailable; the queue-safe seek/Previous path cannot be confirmed.'
+        }
+    }
+
     $expectedJson = ConvertTo-Json $ExpectedAsin.ToUpperInvariant() -Compress
     $expression = @'
 (async()=>{
   const expected=__EXPECTED_ASIN__;
-  const started=Date.now();
   const v=document.getElementById('transportContainer')&&document.getElementById('transportContainer').__vue__;
-  if(!v||typeof v.dragFinished!=='function'||typeof v.handlePreviousButton!=='function')
-    return JSON.stringify({ok:false,error:'Transport seek/Previous methods were not found'});
+  if(!v||typeof v.handlePreviousButton!=='function')
+    return JSON.stringify({ok:false,error:'Amazon Previous control is unavailable'});
   const p=v.$store&&v.$store.state&&v.$store.state.player;
-  const read=()=>{const m=p&&p.model||{},t=m.currentPlayable&&m.currentPlayable.track,d=Number(m.duration)||((Number(t&&t.duration)||0)*1000);return {asin:t&&t.asin||'',position:p&&p.progress&&p.progress.currentTime||0,duration:d,hasNext:!!v.hasNext}};
-  let before=read(),readyDeadline=Date.now()+1000;
-  while(Date.now()<readyDeadline&&(before.asin!==expected||before.duration<5000)){await new Promise(r=>setTimeout(r,10));before=read()}
-  if(before.asin!==expected)
-    return JSON.stringify({ok:false,error:'The current ASIN has not synchronized with the expected track',expected:expected,before:before});
-  let now=read(),mode='seek';
-  if(before.duration>=5000){
-    const target=4000;
-    v.dragFinished(Math.min(90,target/before.duration*100));
-    let deadline=Date.now()+1200;
-    while(Date.now()<deadline&&now.asin===before.asin&&now.position<3000){await new Promise(r=>setTimeout(r,15));now=read()}
-    if(now.asin!==before.asin)
-      return JSON.stringify({ok:false,error:'The track changed during seek',before:before,sought:now});
-    if(now.position<3000)
-      return JSON.stringify({ok:false,error:'Native seek did not reach the safe Previous threshold',before:before,sought:now});
-  }else{
-    // Some tracks publish track.duration before model.duration; read() handles
-    // both.  If neither exists, progress itself is the authoritative Previous
-    // gate.  The 3.5 s deadline is measured from function entry, so this does
-    // not repeat the old one-second readiness wait plus another 3.5 seconds.
-    mode='progress-gate';
-    const safeDeadline=started+3500;
-    while(Date.now()<safeDeadline&&now.asin===before.asin&&now.position<3000){await new Promise(r=>setTimeout(r,10));now=read()}
-    if(now.asin!==before.asin)
-      return JSON.stringify({ok:false,error:'The track changed while waiting for the safe progress threshold',before:before,sought:now});
-    if(now.position<3000)
-      return JSON.stringify({ok:false,error:'Track duration is unknown and playback did not reach the safe Previous threshold',before:before,sought:now});
+  const read=()=>{
+    const m=p&&p.model||{},t=m.currentPlayable&&m.currentPlayable.track,pr=p&&p.progress||{};
+    const duration=Number(m.duration)||Number(t&&t.duration||0)*1000;
+    return {asin:String(t&&t.asin||''),position:Number(pr.currentTime||0),duration:duration,state:String(m.state||'')};
+  };
+  let before=read(),syncDeadline=Date.now()+1500;
+  while(Date.now()<syncDeadline&&before.asin.toUpperCase()!==expected){
+    await new Promise(r=>setTimeout(r,10));
+    before=read();
   }
-  await Promise.resolve(v.handlePreviousButton());
-  let deadline=Date.now()+1600,after=read();
-  while(Date.now()<deadline&&after.asin===before.asin&&after.position>1000){await new Promise(r=>setTimeout(r,15));after=read()}
-  if(after.asin!==before.asin)
-    return JSON.stringify({ok:false,error:'Previous selected a different track',before:before,sought:now,after:after});
+  if(before.asin.toUpperCase()!==expected)
+    return JSON.stringify({ok:false,error:'The current ASIN has not synchronized before the 5.5-second seek',before});
+  const target=5500;
+  const previousGate=5000;
+  let mode='';
+  try{
+    if(window.Native&&window.Native.Player&&typeof window.Native.Player.seek==='function'){
+      await Promise.resolve(window.Native.Player.seek(target,'progress'));
+      mode='native-seek';
+    }else if(typeof v.dragFinished==='function'){
+      if(before.duration<target)
+        return JSON.stringify({ok:false,error:'Track duration is too short for the safe 5.5-second Previous gate',before});
+      await Promise.resolve(v.dragFinished(Math.min(90,target/before.duration*100)));
+      mode='vue-seek';
+    }else{
+      return JSON.stringify({ok:false,error:'No seek method is available',before});
+    }
+  }catch(e){
+    return JSON.stringify({ok:false,error:String(e&&e.message||e),before});
+  }
+  let sought=read(),seekDeadline=Date.now()+1200;
+  while(Date.now()<seekDeadline&&sought.asin.toUpperCase()===expected&&sought.position<previousGate){
+    await new Promise(r=>setTimeout(r,15));
+    sought=read();
+  }
+  if(sought.asin.toUpperCase()!==expected)
+    return JSON.stringify({ok:false,error:'The track changed during the 5.5-second seek',before,sought});
+  if(sought.position<previousGate)
+    return JSON.stringify({ok:false,error:'The 5.5-second seek did not reach the safe Previous threshold',before,sought,mode});
+  try{
+    await Promise.resolve(v.handlePreviousButton());
+  }catch(e){
+    return JSON.stringify({ok:false,error:String(e&&e.message||e),before,sought,mode});
+  }
+  let after=read(),resetDeadline=Date.now()+1600;
+  while(Date.now()<resetDeadline&&after.asin.toUpperCase()===expected&&after.position>1000){
+    await new Promise(r=>setTimeout(r,15));
+    after=read();
+  }
+  if(after.asin.toUpperCase()!==expected)
+    return JSON.stringify({ok:false,error:'Previous selected a different track',before,sought,after,mode});
   if(after.position>1000)
-    return JSON.stringify({ok:false,error:'Previous did not return to the start of the track',before:before,sought:now,after:after});
-  return JSON.stringify({ok:true,asin:before.asin,soughtMs:now.position,positionMs:after.position,hasNext:after.hasNext,mode:mode});
+    return JSON.stringify({ok:false,error:'Previous did not return to the start of the current track',before,sought,after,mode});
+  return JSON.stringify({ok:true,mode:mode,soughtMs:sought.position,positionMs:after.position,beforePositionMs:before.position});
 })()
 '@
     $expression = $expression.Replace('__EXPECTED_ASIN__', $expectedJson)
-    $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
-    if (-not $result.ok) { throw "Amazon fast same-track replay failed: $($result.error)" }
-    return $result
+    try {
+        $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
+        return [pscustomobject]@{
+            Success = [bool]$result.ok
+            Mode = [string]$result.mode
+            SoughtMs = [int64]$result.soughtMs
+            PositionMs = [int64]$result.positionMs
+            BeforePositionMs = [int64]$result.beforePositionMs
+            Reason = [string]$result.error
+        }
+    } catch {
+        return [pscustomobject]@{ Success=$false; Mode=''; SoughtMs=0; PositionMs=0; BeforePositionMs=0; Reason=$_.Exception.Message }
+    }
+}
+
+function Seek-AmazonCdpTrackToStart {
+    param(
+        [Parameter(Mandatory)] [string] $ExpectedAsin,
+        [int] $TimeoutMilliseconds = 2500,
+        [switch] $RequireProgressBeforeSeek,
+        [switch] $PipelineReady
+    )
+
+    # Amazon can publish currentPlayable before AudioPipeline has built the
+    # first buffered fragment. A seek sent in that window is logged as
+    # "Deferring seek; current track not yet initialized" and the first Play
+    # can then resume from the beginning of the buffered fragment (often near
+    # 1 second). Wait for a non-zero buffer, then issue the final seek while
+    # the transport is still paused. This is different from waiting for the
+    # visible progress counter, which cannot advance while paused.
+    $expectedJson = ConvertTo-Json $ExpectedAsin.ToUpperInvariant() -Compress
+    $requireProgressJson = if ($RequireProgressBeforeSeek) { 'true' } else { 'false' }
+    $pipelineReadyJson = if ($PipelineReady) { 'true' } else { 'false' }
+    $expression = @"
+(async()=>{
+  const expected=$expectedJson,requireProgress=$requireProgressJson,pipelineReady=$pipelineReadyJson,deadline=Date.now()+$TimeoutMilliseconds;
+  const e=document.getElementById('transportContainer'),v=e&&e.__vue__;
+  if(!v)return JSON.stringify({ok:false,error:'Transport component not found'});
+  const p=v.`$store&&v.`$store.state&&v.`$store.state.player;
+  const read=()=>{
+    const m=p&&p.model||{},t=m.currentPlayable&&m.currentPlayable.track,pr=p&&p.progress||{};
+    const duration=Number(m.duration)||Number(t&&t.duration||0)*1000;
+    const buffered=Number(pr.buffered||0);
+    return {
+      asin:String(t&&t.asin||''),position:Number(pr.currentTime||0),buffered:buffered,
+      duration:duration,state:String(m.state||''),isSeeking:!!m.isSeeking
+    }
+  };
+  let state=read();
+  if(state.asin.toUpperCase()!==expected)
+    return JSON.stringify({ok:false,error:'The current ASIN changed before the final position reset',state});
+  // When playback is kept running, wait for the first real progress tick so a
+  // pre-initialization position of exactly zero is not mistaken for a seek
+  // result. In the paused path below we use the buffered-fragment boundary
+  // instead, because the visible progress counter cannot advance while paused.
+  if(requireProgress){
+    let initialized=false;
+    while(Date.now()<deadline){
+      state=read();
+      if(state.asin.toUpperCase()!==expected)
+        return JSON.stringify({ok:false,error:'The current ASIN changed while waiting for audio initialization',state});
+      if(state.position>0){initialized=true;break}
+      await new Promise(r=>setTimeout(r,10));
+    }
+    if(!initialized)
+      return JSON.stringify({ok:false,error:'The new track audio pipeline was not initialized before the final seek',state});
+  }
+  const beforeSeekPosition=state.position;
+  let method='',attempts=0,readyObserved=false,readyWaitMs=0;
+  const readyStarted=Date.now();
+  const issueSeek=async()=>{
+    if(window.Native&&window.Native.Player&&typeof window.Native.Player.seek==='function'){
+      await Promise.resolve(window.Native.Player.seek(0,'progress'));
+      method='native';
+    } else if(typeof v.dragFinished==='function'){
+      await Promise.resolve(v.dragFinished(0));
+      method='vue';
+    }
+    attempts++;
+  };
+  if(requireProgress){
+    try { await issueSeek(); } catch(e) {
+      return JSON.stringify({ok:false,error:String(e&&e.message||e),state,attempts});
+    }
+    if(!method)return JSON.stringify({ok:false,error:'No seek method is available',state,attempts});
+  } else if(pipelineReady){
+    readyObserved=true;
+    readyWaitMs=0;
+    try { await issueSeek(); } catch(e) {
+      return JSON.stringify({ok:false,error:String(e&&e.message||e),state,attempts,readyWaitMs});
+    }
+  } else {
+    // Do not accept the initial zero position as proof of success: before the
+    // first fragment is buffered, Amazon reports zero even though the native
+    // seek has been deferred. The seek is issued only after buffered > 0.
+    while(Date.now()<deadline){
+      state=read();
+      if(state.asin.toUpperCase()!==expected)
+        return JSON.stringify({ok:false,error:'The current ASIN changed while waiting for the audio pipeline',state,attempts});
+      if(state.buffered>0){
+        readyObserved=true;
+        readyWaitMs=Date.now()-readyStarted;
+        try { await issueSeek(); } catch(e) {
+          return JSON.stringify({ok:false,error:String(e&&e.message||e),state,attempts,readyWaitMs});
+        }
+        break;
+      }
+      await new Promise(r=>setTimeout(r,20));
+    }
+    if(!readyObserved)
+      return JSON.stringify({ok:false,error:'The new track audio pipeline did not expose a buffered fragment before the final seek',state,attempts,readyWaitMs:Date.now()-readyStarted});
+    if(!method)return JSON.stringify({ok:false,error:'No seek method is available',state,attempts,readyWaitMs});
+  }
+  // Give the renderer one progress tick to commit the asynchronous seek before
+  // declaring success. This is intentionally short; the caller supplies the
+  // separate hold before Play.
+  await new Promise(r=>setTimeout(r,15));
+  while(Date.now()<deadline){
+    state=read();
+    if(state.asin.toUpperCase()!==expected)
+      return JSON.stringify({ok:false,error:'The current ASIN changed during the final position reset',state,method,attempts,readyWaitMs});
+    if(state.position<=50)
+      return JSON.stringify({ok:true,asin:state.asin,positionMs:state.position,beforePositionMs:beforeSeekPosition,method,attempts,readyWaitMs});
+    await new Promise(r=>setTimeout(r,15));
+  }
+  return JSON.stringify({ok:false,error:'The final seek did not settle within 50 ms of the start of the track',state,method,attempts,readyWaitMs});
+})()
+"@
+    try {
+        $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
+        return [pscustomobject]@{
+            Success = [bool]$result.ok
+            PositionMs = [int64]$result.positionMs
+            BeforePositionMs = [int64]$result.beforePositionMs
+            Method = [string]$result.method
+            Reason = [string]$result.error
+            Attempts = [int]$result.attempts
+            ReadyWaitMs = [int]$result.readyWaitMs
+        }
+    } catch {
+        return [pscustomobject]@{ Success=$false; PositionMs=0; Method=''; Reason=$_.Exception.Message; Attempts=0; ReadyWaitMs=0 }
+    }
+}
+
+function Invoke-AmazonCdpPlaybackToggle {
+    if (-not ($script:CdpEnabled -and $script:CdpWebSocketUrl)) { return $false }
+
+    $expression = @'
+(async()=>{const e=document.getElementById('transportContainer'),v=e&&e.__vue__;if(!v)return JSON.stringify({ok:false,error:'Transport component not found'});const fn=typeof v.handlePlayButton==='function'?v.handlePlayButton:(typeof v.handlePlayback==='function'?v.handlePlayback:null);if(!fn)return JSON.stringify({ok:false,error:'Amazon playback control is unavailable'});try{await Promise.resolve(fn.call(v));return JSON.stringify({ok:true})}catch(e){return JSON.stringify({ok:false,error:String(e&&e.message||e)})}})()
+'@
+    try {
+        $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
+        return [bool]$result.ok
+    } catch {
+        return $false
+    }
+}
+
+function Pause-AmazonPlaybackForSwitch {
+    param(
+        [string] $State = '',
+        [switch] $AssumePlaying
+    )
+
+    $wasPlaying = if ([string]::IsNullOrWhiteSpace($State)) {
+        [bool]$AssumePlaying
+    } else {
+        $State -notmatch '(?i)pause|stop|idle|end|finish'
+    }
+    if (-not $wasPlaying) {
+        return [pscustomobject]@{ Success=$true; Changed=$false; WasPlaying=$false; Reason='Amazon was already paused' }
+    }
+
+    try {
+        $method = if (Invoke-AmazonCdpPlaybackToggle) {
+            'CDP'
+        } else {
+            [AmazonMediaCommands]::TogglePlayback((Get-MainWindow).MainWindowHandle)
+            'MediaKey'
+        }
+        Start-Sleep -Milliseconds 15
+        return [pscustomobject]@{ Success=$true; Changed=$true; WasPlaying=$true; Reason="method=$method" }
+    } catch {
+        return [pscustomobject]@{ Success=$false; Changed=$false; WasPlaying=$true; Reason=$_.Exception.Message }
+    }
+}
+
+function Resume-AmazonPlaybackImmediately {
+    param([Parameter(Mandatory)] [bool] $WasPaused)
+
+    if (-not $WasPaused) {
+        return [pscustomobject]@{ Success=$true; Changed=$false; Method=''; Reason='Playback was not paused by the switcher' }
+    }
+
+    try {
+        $method = if (Invoke-AmazonCdpPlaybackToggle) {
+            'CDP'
+        } else {
+            [AmazonMediaCommands]::TogglePlayback((Get-MainWindow).MainWindowHandle)
+            'MediaKey'
+        }
+        Start-Sleep -Milliseconds 15
+        return [pscustomobject]@{ Success=$true; Changed=$true; Method=$method; Reason="method=$method" }
+    } catch {
+        return [pscustomobject]@{ Success=$false; Changed=$false; Method=''; Reason=$_.Exception.Message }
+    }
+}
+
+function Ensure-AmazonCdpPlaybackPaused {
+    if (-not ($script:CdpEnabled -and $script:CdpWebSocketUrl)) {
+        return [pscustomobject]@{ Success=$false; Changed=$false; State=''; Reason='CDP is unavailable.' }
+    }
+
+    $expression = @'
+(async()=>{
+  const e=document.getElementById('transportContainer'),v=e&&e.__vue__,p=v&&v.$store&&v.$store.state&&v.$store.state.player;
+  if(!v||!p)return JSON.stringify({ok:false,error:'Amazon player state is unavailable'});
+  const fn=typeof v.handlePlayButton==='function'?v.handlePlayButton:(typeof v.handlePlayback==='function'?v.handlePlayback:null);
+  if(!fn)return JSON.stringify({ok:false,error:'Amazon playback control is unavailable'});
+  const read=()=>String(p.model&&p.model.state||'');
+  let state=read();
+  if(!state)return JSON.stringify({ok:false,error:'Amazon playback state is empty'});
+  if(/pause|stop|idle|end|finish/i.test(state))return JSON.stringify({ok:true,changed:false,state});
+  try{await Promise.resolve(fn.call(v));}catch(error){return JSON.stringify({ok:false,error:String(error&&error.message||error),state});}
+  const deadline=Date.now()+500;
+  do{
+    state=read();
+    if(/pause|stop|idle|end|finish/i.test(state))return JSON.stringify({ok:true,changed:true,state});
+    await new Promise(r=>setTimeout(r,15));
+  }while(Date.now()<deadline);
+  return JSON.stringify({ok:false,changed:true,state,error:'Amazon did not settle in a paused state'});
+})()
+'@
+    try {
+        $result = Invoke-AmazonCdpExpression -Expression $expression | ConvertFrom-Json
+        return [pscustomobject]@{
+            Success = [bool]$result.ok
+            Changed = [bool]$result.changed
+            State = [string]$result.state
+            Reason = [string]$result.error
+        }
+    } catch {
+        return [pscustomobject]@{ Success=$false; Changed=$false; State=''; Reason=$_.Exception.Message }
+    }
+}
+
+function Resume-AmazonPlaybackAfterSwitch {
+    param(
+        [Parameter(Mandatory)] [bool] $WasPaused,
+        [string] $ExpectedAsin = '',
+        [string] $AmazonDeviceId = ''
+    )
+
+    if (-not $WasPaused) {
+        return [pscustomobject]@{ Success=$true; Changed=$false; ReplaySuccess=$true; ReplayMode=''; ReplayReason=''; ReplayMs=0; ReplaySoughtMs=0; ReplayPositionMs=0; PauseAfterReplaySuccess=$true; PauseAfterReplayChanged=$false; PauseAfterReplayMs=0; ExclusiveSuccess=$true; ExclusiveMs=0; ExclusiveReason=''; Reason='Playback was not paused by the switcher' }
+    }
+
+    try {
+        # Amazon's Previous button only restarts the current track after its
+        # position has crossed the same safe threshold used by the app. Seek
+        # to about 5.5 seconds while still paused, then invoke Previous so
+        # Amazon resets its own playback instance and decoder cursor.
+        $replayTimer = [Diagnostics.Stopwatch]::StartNew()
+        $replay = Invoke-AmazonCdpFastRestartCurrentTrack -ExpectedAsin $ExpectedAsin
+        $replayElapsed = [int]$replayTimer.ElapsedMilliseconds
+        if (-not $replay.Success) {
+            throw "Could not seek to 5.5 seconds and restart the current track: $($replay.Reason)"
+        }
+
+        # Previous normally preserves the paused state, but some Amazon builds
+        # briefly resume the restarted instance. Explicitly settle it paused
+        # before touching Exclusive so the final Play is the only audible start.
+        $pauseAfterReplayTimer = [Diagnostics.Stopwatch]::StartNew()
+        $pauseAfterReplay = Ensure-AmazonCdpPlaybackPaused
+        $pauseAfterReplayElapsed = [int]$pauseAfterReplayTimer.ElapsedMilliseconds
+        if (-not $pauseAfterReplay.Success) {
+            throw "Amazon did not remain paused after Previous: $($pauseAfterReplay.Reason)"
+        }
+
+        # Previous can release Exclusive while Amazon creates the restarted
+        # playback instance. Re-arm it only after Previous has returned to the
+        # current track, immediately before the final Play.
+        $exclusiveSuccess = $true
+        $exclusiveReason = ''
+        $exclusiveElapsed = 0
+        if ($script:ExclusiveMode) {
+            if (-not $AmazonDeviceId) { throw 'Amazon output device ID is required to re-arm Exclusive after Previous.' }
+            $exclusiveTimer = [Diagnostics.Stopwatch]::StartNew()
+            $exclusiveState = Set-AmazonCdpOutputMode -EnableExclusive $true -AmazonDeviceId $AmazonDeviceId -ForceExclusiveCycle
+            $exclusiveElapsed = [int]$exclusiveTimer.ElapsedMilliseconds
+            $exclusiveSuccess = [bool]$exclusiveState.Success
+            $exclusiveReason = [string]$exclusiveState.Reason
+            if (-not $exclusiveSuccess) {
+                throw "Amazon Exclusive could not be re-armed after Previous: $exclusiveReason"
+            }
+            Write-Log "Amazon Exclusive active after Previous on $($exclusiveState.Device)." Green
+        }
+
+        $playSuccess = Invoke-AmazonCdpPlaybackToggle
+        $method = if ($playSuccess) {
+            'CDP'
+        } else {
+            [AmazonMediaCommands]::TogglePlayback((Get-MainWindow).MainWindowHandle)
+            'MediaKey'
+        }
+        Start-Sleep -Milliseconds 15
+        return [pscustomobject]@{
+            Success=$true; Changed=$true; ReplaySuccess=$replay.Success; ReplayMode=$replay.Mode; ReplayReason=$replay.Reason
+            ReplayMs=$replayElapsed; ReplaySoughtMs=$replay.SoughtMs; ReplayPositionMs=$replay.PositionMs
+            PauseAfterReplaySuccess=$pauseAfterReplay.Success; PauseAfterReplayChanged=$pauseAfterReplay.Changed; PauseAfterReplayMs=$pauseAfterReplayElapsed
+            ExclusiveSuccess=$exclusiveSuccess; ExclusiveMs=$exclusiveElapsed; ExclusiveReason=$exclusiveReason
+            Reason="replay=$($replay.Mode); method=$method"
+        }
+    } catch {
+        return [pscustomobject]@{ Success=$false; Changed=$false; ReplaySuccess=$false; ReplayMode=''; ReplayReason=$_.Exception.Message; ReplayMs=0; ReplaySoughtMs=0; ReplayPositionMs=0; PauseAfterReplaySuccess=$false; PauseAfterReplayChanged=$false; PauseAfterReplayMs=0; ExclusiveSuccess=$false; ExclusiveMs=0; ExclusiveReason=$_.Exception.Message; Reason=$_.Exception.Message }
+    }
 }
 
 function Wait-AmazonCdpFormat {
     param(
         [Parameter(Mandatory)] $Target,
         [Parameter(Mandatory)][string] $Asin,
-        [int] $TimeoutMilliseconds = 5000
+        [int] $TimeoutMilliseconds = 5000,
+        [switch] $RequireExclusive
     )
     # Wait inside Amazon's renderer in a single CDP request.  The previous
     # PowerShell loop made a full websocket round trip and rebuilt a snapshot
@@ -900,14 +1456,16 @@ function Wait-AmazonCdpFormat {
     $asinJson = ConvertTo-Json $Asin.ToUpperInvariant() -Compress
     $bits = [int]$Target.Bits
     $rate = [int]$Target.RateHz
+    $requireExclusiveJson = if ($RequireExclusive) { 'true' } else { 'false' }
     $expression = @"
 (async()=>{
-  const expected=$asinJson,bits=$bits,rate=$rate,deadline=Date.now()+$TimeoutMilliseconds;
+  const expected=$asinJson,bits=$bits,rate=$rate,requireExclusive=$requireExclusiveJson,deadline=Date.now()+$TimeoutMilliseconds;
   while(Date.now()<deadline){
     const v=document.getElementById('transportContainer')&&document.getElementById('transportContainer').__vue__;
-    const p=v&&v.`$store&&v.`$store.state&&v.`$store.state.player,m=p&&p.model,t=m&&m.currentPlayable&&m.currentPlayable.track,a=m&&m.audioAttributes;
-    if(t&&String(t.asin||'').toUpperCase()===expected&&a&&Number(a.bitDepth)===bits&&Number(a.sampleRate)===rate)
-      return JSON.stringify({ok:true,asin:String(t.asin||''),title:String(t.title||''),bits:Number(a.bitDepth),rate:Number(a.sampleRate)});
+    const p=v&&v.`$store&&v.`$store.state&&v.`$store.state.player,m=p&&p.model,t=m&&m.currentPlayable&&m.currentPlayable.track,a=m&&m.audioAttributes,o=m&&m.outputDeviceAttributes;
+    const exclusive=!!(o&&o.exclusiveMode);
+    if(t&&String(t.asin||'').toUpperCase()===expected&&a&&Number(a.bitDepth)===bits&&Number(a.sampleRate)===rate&&(!requireExclusive||exclusive))
+      return JSON.stringify({ok:true,asin:String(t.asin||''),title:String(t.title||''),bits:Number(a.bitDepth),rate:Number(a.sampleRate),exclusive:exclusive});
     await new Promise(r=>setTimeout(r,10));
   }
   return JSON.stringify({ok:false});
@@ -1102,6 +1660,42 @@ function Wait-AmazonTrackEvent {
         Start-Sleep -Milliseconds 60
     } while ((Get-Date) -lt $deadline)
     return $null
+}
+
+function Wait-AmazonTrackPipelineInitialized {
+    param(
+        [Parameter(Mandatory)] [string] $Asin,
+        [Parameter(Mandatory)] [int64] $AfterOffset,
+        [int] $TimeoutMilliseconds = 2500
+    )
+
+    # The renderer exposes currentPlayable before the native AudioPipeline has
+    # built its first track. AmazonMusic.log is the only reliable boundary for
+    # that transition: the native layer emits Track Initialization Succeeded
+    # immediately after the first playable fragment is assembled.
+    if (-not $script:AmazonLogPath -or -not (Test-Path -LiteralPath $script:AmazonLogPath)) {
+        return [pscustomobject]@{ Success=$false; ElapsedMs=0; Reason='AmazonMusic.log is unavailable' }
+    }
+    $pattern = 'Track Initialization Succeeded:\s*track\s+asin://' + [regex]::Escape($Asin) + ':'
+    $differentTrackPattern = 'new track playing\s*:\s*asin://(?<asin>[A-Z0-9]+)'
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    $deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $TimeoutMilliseconds))
+    do {
+        $text = Read-AmazonLogRange -StartOffset $AfterOffset
+        if ($text -and [regex]::IsMatch($text, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+            return [pscustomobject]@{ Success=$true; ElapsedMs=[int]$started.ElapsedMilliseconds; Reason='' }
+        }
+        # If another track has already become current, this switch is stale;
+        # do not wait for an initialization event that belongs to an old ASIN.
+        $events = [regex]::Matches($text, $differentTrackPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        foreach ($event in $events) {
+            if ($event.Groups['asin'].Value.ToUpperInvariant() -ne $Asin.ToUpperInvariant()) {
+                return [pscustomobject]@{ Success=$false; ElapsedMs=[int]$started.ElapsedMilliseconds; Reason='A different track became current while waiting for initialization' }
+            }
+        }
+        Start-Sleep -Milliseconds 40
+    } while ((Get-Date) -lt $deadline)
+    return [pscustomobject]@{ Success=$false; ElapsedMs=[int]$started.ElapsedMilliseconds; Reason='Track Initialization Succeeded was not observed before the timeout' }
 }
 
 function Wait-AmazonSameTrackDelay {
@@ -1331,6 +1925,17 @@ function Resolve-Device {
     return $device
 }
 
+function Assert-AsioExclusiveDevice {
+    param([Parameter(Mandatory)] $Device)
+
+    if (-not $script:AsioExclusiveMode) { return }
+    $expectedId = $script:AsioCableDeviceId
+    $actualId = [string]$Device.'Command-Line Friendly ID'
+    if ($actualId -ne $expectedId) {
+        throw 'ASIO + Amazon Exclusive requires the Amazon output endpoint to be Hi-Fi Cable Input.'
+    }
+}
+
 function Get-DeviceColumnValueFast {
     param(
         [Parameter(Mandatory)] [string] $DeviceId,
@@ -1368,27 +1973,6 @@ function Get-DeviceDefaultFormatFast {
         if ($direct) { return $direct }
     }
     return Get-DeviceColumnValueFast -DeviceId $DeviceId -Column 'Default Format'
-}
-
-function Set-EndpointMuteFast {
-    param(
-        [Parameter(Mandatory)] $Device,
-        [Parameter(Mandatory)] [bool] $Muted
-    )
-    $friendlyId = [string]$Device.'Command-Line Friendly ID'
-    $coreAudioId = [string]$Device.'Item ID'
-    if (-not $coreAudioId -and $friendlyId) {
-        $coreAudioId = Get-DeviceColumnValueFast -DeviceId $friendlyId -Column 'Item ID'
-    }
-    if ($coreAudioId -and [CoreAudioEndpoint]::SetMute($coreAudioId, $Muted)) { return $true }
-
-    # Keep a tested fallback for unusual drivers/endpoints that reject direct
-    # IAudioEndpointVolume activation.
-    if ($friendlyId) {
-        Invoke-SoundVolumeView $(if ($Muted) { '/Mute' } else { '/Unmute' }) $friendlyId
-        return $true
-    }
-    return $false
 }
 
 function Wait-DeviceDefaultFormatFast {
@@ -1434,30 +2018,27 @@ function Set-EndpointFormat {
         [Parameter(Mandatory)] $Format,
         $CurrentPlaying,
         [Parameter(Mandatory)] [int] $Channels,
-        [Parameter(Mandatory)] [bool] $MuteDuringSwitch,
         [Parameter(Mandatory)] [int] $WaitForRebuildSeconds,
         [Parameter(Mandatory)] [int] $RecoveryWaitSeconds,
         [string] $Asin = '',
         [hashtable] $AsinFormats,
         [int] $RestartDelayMilliseconds = 3500,
-        [bool] $PreMuted = $false,
         [hashtable] $Timing
     )
 
     Assert-Tool
     if (-not $Timing) { $Timing = @{} }
-    foreach ($stageName in @('MuteMs', 'RestartGateMs', 'EndpointFormatMs', 'ReplayRequestMs', 'SameAsinWaitMs', 'PlaybackFormatWaitMs', 'FailureResyncMs', 'RecoveryMs', 'UnmuteCommandMs', 'SetEndpointTotalMs')) {
-        $Timing[$stageName] = 0
+    foreach ($stageName in @('PauseMs', 'ExclusiveMs', 'ReplayMs', 'ResumeMs', 'EndpointFormatMs', 'SetEndpointTotalMs')) {
+        if (-not $Timing.ContainsKey($stageName)) { $Timing[$stageName] = 0 }
     }
     $setEndpointTimer = [Diagnostics.Stopwatch]::StartNew()
-    $script:LastUnmuteIssued = $true
     $script:LastUnexpectedAsin = ''
     $script:LastResyncSuccess = $false
     $script:LastResyncTarget = ''
     New-Item -ItemType Directory -Path $script:StateDirectory -Force | Out-Null
     $id = $Device.'Command-Line Friendly ID'
     $before = $Device.'Default Format'
-    $cableRenderId = 'VB-Audio Hi-Fi Cable\Device\Hi-Fi Cable Input\Render'
+    $cableRenderId = $script:AsioCableDeviceId
     $cableCaptureId = 'VB-Audio Hi-Fi Cable\Device\Hi-Fi Cable Output\Capture'
     $isAsioCable = $id -eq $cableRenderId
     $cableFormatKey = "$($Format.Bits)/$($Format.RateHz)/$Channels"
@@ -1465,7 +2046,7 @@ function Set-EndpointFormat {
     $endpointAlreadyMatches = $before -match "(?i)\b$($Format.Bits) bit\b" -and $before -match "\b$($Format.RateHz) Hz\b"
     $cablePairNeedsSync = $isAsioCable -and $script:CableCaptureFormatKey -ne $cableFormatKey
     if ($endpointAlreadyMatches -and -not $cablePairNeedsSync -and (Test-FormatMatch $CurrentPlaying $Format)) {
-        Write-Log "The endpoint is already $($Format.Bits)-bit/$($Format.RateHz) Hz; no switch is needed." DarkGray
+        Write-Log "The endpoint is already $($Format.Bits)-bit/$($Format.RateHz) Hz; deferring Exclusive until after the 5.5-second seek and Previous restart." DarkGray
         return $true
     }
 
@@ -1483,30 +2064,14 @@ function Set-EndpointFormat {
     } else {
         Test-AmazonSessionActive $Device
     }
-    $ownsMute = $PreMuted
     # ASIO4ALL test mode: keep ASIO Bridge resident and let the driver observe
     # the paired Cable format change without an explicit OFF/ON toggle.
     try {
-        $stageTimer = [Diagnostics.Stopwatch]::StartNew()
-        if (-not $PreMuted -and $streamWasActive -and $MuteDuringSwitch) {
-            if (-not (Set-EndpointMuteFast -Device $Device -Muted $true)) { throw 'Could not mute the endpoint.' }
-            $ownsMute = $true
-            Write-Log 'Endpoint muted; Amazon transport continues playing.' DarkGray
-        }
-        $Timing['MuteMs'] = [int]$stageTimer.ElapsedMilliseconds
-
-        if ($streamWasActive -and -not ($script:CdpEnabled -and $script:CdpWebSocketUrl)) {
-            # Amazon's Windows media session frequently leaves TimelineProperties
-            # stale, so it cannot be trusted as a restart gate. This function is
-            # entered immediately after Amazon's own `new track playing` event.
-            Write-Log ("Waiting {0} ms after the Amazon track event to cross the same-track Previous threshold." -f $RestartDelayMilliseconds) DarkGray
-            $stageTimer = [Diagnostics.Stopwatch]::StartNew()
-            if ($Asin) {
-                if (-not (Wait-AmazonSameTrackDelay -Asin $Asin -Milliseconds $RestartDelayMilliseconds)) { return $false }
-            } else {
-                Start-Sleep -Milliseconds $RestartDelayMilliseconds
-            }
-            $Timing['RestartGateMs'] = [int]$stageTimer.ElapsedMilliseconds
+        # The monitor pauses the new track before entering this function and
+        # resumes it only after the endpoint format is ready. Exclusive is
+        # deliberately deferred until after the queue-safe Previous restart.
+        if ($script:ExclusiveMode) {
+            Write-Log 'Deferring Amazon Exclusive until after the queue-safe Previous restart.' DarkGray
         }
 
         $stageTimer = [Diagnostics.Stopwatch]::StartNew()
@@ -1540,159 +2105,26 @@ function Set-EndpointFormat {
         Write-Log "Endpoint format confirmed: $actual" Green
         if ($isAsioCable) { $script:CableCaptureFormatKey = $cableFormatKey }
         if (-not $endpointAlreadyMatches -or $cablePairNeedsSync) {
-            Write-Log 'ASIO4ALL remains ON; waiting for it to reopen the stream at the new format.' DarkGray
+            if ($isAsioCable) {
+                Write-Log 'ASIO4ALL remains ON; waiting for it to reopen the stream at the new format.' DarkGray
+            } else {
+                Write-Log 'Waiting for Amazon to reopen the selected output stream at the new format.' DarkGray
+            }
         }
         $Timing['EndpointFormatMs'] = [int]$stageTimer.ElapsedMilliseconds
+
         if (-not $streamWasActive) {
             Write-Log 'The Amazon stream is not active; the next playback will be created at the new format.' DarkGray
             return $true
         }
 
-        if ($script:CdpEnabled -and $script:CdpWebSocketUrl -and $Asin) {
-            $stageTimer = [Diagnostics.Stopwatch]::StartNew()
-            try {
-                Write-Log 'Using native CDP seek to 4 seconds followed by Previous: fast same-track replay while preserving the queue.' Cyan
-                $replay = Invoke-AmazonCdpFastRestartCurrentTrack -ExpectedAsin $Asin
-                $Timing['ReplayRequestMs'] = [int]$stageTimer.ElapsedMilliseconds
-                Write-Log ("Fast replay returned to the same ASIN at the start; mode={0}, safe position={1} ms, hasNext={2}." -f $replay.mode, $replay.soughtMs, $replay.hasNext) DarkGray
-                $cdpReplay = Wait-AmazonCdpFormat -Target $Format -Asin $Asin -TimeoutMilliseconds 5000
-                $Timing['PlaybackFormatWaitMs'] = [int]$stageTimer.ElapsedMilliseconds - $Timing['ReplayRequestMs']
-                if ($cdpReplay) {
-                    Write-Log "CDP confirmed same-track rebuild: $($cdpReplay.Title); playback=$($cdpReplay.Playing.Text)." Green
-                    return $true
-                }
-
-                Write-Log 'The first fast replay did not align the format; retrying one queue-safe same-track replay.' Yellow
-                $retryTimer = [Diagnostics.Stopwatch]::StartNew()
-                [void](Invoke-AmazonCdpFastRestartCurrentTrack -ExpectedAsin $Asin)
-                $retryReplay = Wait-AmazonCdpFormat -Target $Format -Asin $Asin -TimeoutMilliseconds 5000
-                $Timing['RecoveryMs'] = [int]$retryTimer.ElapsedMilliseconds
-                if ($retryReplay) {
-                    Write-Log "The second CDP rebuild succeeded; playback=$($retryReplay.Playing.Text)." Green
-                    return $true
-                }
-                Write-Log 'The format remained misaligned after two queue-safe replays; stopping.' Yellow
-                return $false
-            } catch {
-                Write-Log "CDP fast same-track replay failed: $($_.Exception.Message)" Yellow
-
-                # If playback itself never reached the Previous threshold,
-                # pressing Previous after an arbitrary wall-clock delay could
-                # select the prior song.  Fail this track cleanly instead of
-                # turning a stalled stream into a destructive replay attempt.
-                if ($_.Exception.Message -match 'safe Previous threshold') {
-                    Write-Log 'Playback did not reach the safe threshold; Previous will not be pressed to avoid selecting the previous track.' Yellow
-                    return $false
-                }
-
-                Write-Log 'Using the safe Previous fallback.' Yellow
-
-                # The fast path seeks across Amazon's restart threshold before
-                # pressing Previous.  If native seek is unavailable, retain the
-                # conservative wall-clock gate and cancel if playback changes.
-                $safeFallbackDelay = [Math]::Max(3500, $RestartDelayMilliseconds)
-                Write-Log ("CDP fallback will wait {0} ms before safely replaying the current track." -f $safeFallbackDelay) DarkGray
-                $fallbackGateTimer = [Diagnostics.Stopwatch]::StartNew()
-                if ($Asin) {
-                    if (-not (Wait-AmazonSameTrackDelay -Asin $Asin -Milliseconds $safeFallbackDelay)) {
-                        $Timing['RestartGateMs'] = [int]$fallbackGateTimer.ElapsedMilliseconds
-                        return $false
-                    }
-                } else {
-                    Start-Sleep -Milliseconds $safeFallbackDelay
-                }
-                $Timing['RestartGateMs'] = [int]$fallbackGateTimer.ElapsedMilliseconds
-            }
-        }
-
-        $logOffset = Get-AmazonLogLength
-        Write-Log 'Replaying the current track once so Amazon reopens the stream at the new endpoint format.' Cyan
-        $amazon = Get-MainWindow
-        $stageTimer = [Diagnostics.Stopwatch]::StartNew()
-        [AmazonMediaCommands]::RestartCurrentTrack($amazon.MainWindowHandle)
-        $Timing['ReplayRequestMs'] = [int]$stageTimer.ElapsedMilliseconds
-        $verifySeconds = [Math]::Max(8, $WaitForRebuildSeconds + $RecoveryWaitSeconds)
-        if ($Asin) {
-            $stageTimer = [Diagnostics.Stopwatch]::StartNew()
-            # Observe the first playback instance, including an unexpected ASIN.
-            # Waiting only for the expected ASIN hid a Previous misfire for the
-            # full timeout and left the endpoint configured for the wrong song.
-            $rebuiltAsin = Wait-AmazonTrackEvent -AfterOffset $logOffset -Any -TimeoutMilliseconds ($verifySeconds * 1000)
-            $Timing['SameAsinWaitMs'] = [int]$stageTimer.ElapsedMilliseconds
-            if (-not $rebuiltAsin) {
-                Write-Log "Amazon did not create a new same-track playback instance (ASIN $Asin); a 00:00 seek is not considered success." Yellow
-                return $false
-            }
-            if ($rebuiltAsin -ne $Asin) {
-                $script:LastUnexpectedAsin = $rebuiltAsin
-                Write-Log "Replay selected $rebuiltAsin; resyncing the endpoint to the actual track immediately." Yellow
-                $resyncTimer = [Diagnostics.Stopwatch]::StartNew()
-                if ($AsinFormats) {
-                    $script:LastResyncSuccess = Sync-EndpointToActualAmazonTrack `
-                        -DeviceId $id -ActualAsin $rebuiltAsin -AsinFormats $AsinFormats `
-                        -Channels $Channels -AfterOffset $logOffset
-                }
-                $Timing['FailureResyncMs'] = [int]$resyncTimer.ElapsedMilliseconds
-                return $false
-            }
-            Write-Log "Confirmed the new same-track playback instance: $rebuiltAsin." DarkGray
-        }
-        $stageTimer = [Diagnostics.Stopwatch]::StartNew()
-        if (Wait-AmazonBackgroundFormat -Target $Format -AfterOffset $logOffset -TimeoutSeconds $verifySeconds) {
-            $Timing['PlaybackFormatWaitMs'] = [int]$stageTimer.ElapsedMilliseconds
-            Write-Log "Amazon playback telemetry confirms $($Format.Text)." Green
-            return $true
-        }
-        $Timing['PlaybackFormatWaitMs'] = [int]$stageTimer.ElapsedMilliseconds
-
-        # A real same-ASIN replay can occasionally retain the stale stream once.
-        # Permit exactly one bounded replay recovery, then fail closed.
-        $recoveryTimer = [Diagnostics.Stopwatch]::StartNew()
-        Write-Log 'The first same-track replay retained the old stream; waiting 3.5 seconds before one recovery replay.' Yellow
-        Start-Sleep -Milliseconds 3500
-        $retryOffset = Get-AmazonLogLength
-        [AmazonMediaCommands]::RestartCurrentTrack($amazon.MainWindowHandle)
-        if ($Asin) {
-            $retryAsin = Wait-AmazonTrackEvent -AfterOffset $retryOffset -Any -TimeoutMilliseconds ($verifySeconds * 1000)
-            if (-not $retryAsin) {
-                Write-Log 'Recovery did not create a new same-track playback instance; stopping.' Yellow
-                return $false
-            }
-            if ($retryAsin -ne $Asin) {
-                $script:LastUnexpectedAsin = $retryAsin
-                Write-Log "Recovery selected $retryAsin; resyncing the endpoint to the actual track immediately." Yellow
-                $resyncTimer = [Diagnostics.Stopwatch]::StartNew()
-                if ($AsinFormats) {
-                    $script:LastResyncSuccess = Sync-EndpointToActualAmazonTrack `
-                        -DeviceId $id -ActualAsin $retryAsin -AsinFormats $AsinFormats `
-                        -Channels $Channels -AfterOffset $retryOffset
-                }
-                $Timing['FailureResyncMs'] = [int]$resyncTimer.ElapsedMilliseconds
-                return $false
-            }
-        }
-        if (Wait-AmazonBackgroundFormat -Target $Format -AfterOffset $retryOffset -TimeoutSeconds $verifySeconds) {
-            $Timing['RecoveryMs'] = [int]$recoveryTimer.ElapsedMilliseconds
-            Write-Log "The second same-track replay succeeded; Amazon playback is $($Format.Text)." Green
-            return $true
-        }
-
-        $Timing['RecoveryMs'] = [int]$recoveryTimer.ElapsedMilliseconds
-        Write-Log 'The target format was not reported after two same-track replays; stopping to avoid an infinite loop.' Yellow
-        return $false
+        # Endpoint is ready. The caller performs the paused 5.5-second seek,
+        # Previous restart, Exclusive re-arm, and final Play.
+        Write-Log 'Track change prepared; waiting for the 5.5-second seek, Previous restart, and Exclusive resume.' DarkGray
+        return $true
     }
     finally {
         # ASIO4ALL test mode leaves the resident Bridge untouched.
-        $unmuteTimer = [Diagnostics.Stopwatch]::StartNew()
-        if ($ownsMute) {
-            $script:LastUnmuteIssued = Set-EndpointMuteFast -Device $Device -Muted $false
-            if ($script:LastUnmuteIssued) {
-                Write-Log 'Sent the endpoint unmute command; no read-back wait.' DarkGray
-            } else {
-                Write-Log 'The endpoint unmute command failed.' Red
-            }
-        }
-        $Timing['UnmuteCommandMs'] = [int]$unmuteTimer.ElapsedMilliseconds
         $Timing['SetEndpointTotalMs'] = [int]$setEndpointTimer.ElapsedMilliseconds
     }
 }
@@ -1712,6 +2144,38 @@ $script:ShowDetailedTiming = [bool]$config.showDetailedTiming
 $script:CdpEnabled = [bool]$Cdp -or ([bool]$config.cdpEnabled)
 $script:CdpAllowLaunch = [bool]$CdpLaunch -or ([bool]$config.cdpAutoLaunch)
 
+if ($Exclusive -and $AsioExclusive) {
+    throw 'Use either -Exclusive or -AsioExclusive, not both.'
+}
+
+if ($Exclusive) {
+    # Amazon exposes Exclusive through its native player bridge, which is only
+    # reachable from the renderer. Exclusive therefore implies Direct + CDP.
+    $Direct = $true
+    $script:CdpEnabled = $true
+}
+
+if ($AsioExclusive) {
+    # ASIO Exclusive uses Amazon's renderer API to select Hi-Fi Cable Input and
+    # therefore always needs CDP. It intentionally leaves $Direct false so the
+    # resident ASIO Bridge is not stopped by the Direct setup below.
+    $script:CdpEnabled = $true
+    # The ASIO-only user path never targets a physical Windows endpoint.  Keep
+    # the virtual cable fixed even when an older config.json still contains a
+    # physical device ID from a previous Direct/Exclusive setup.
+    $DeviceId = $script:AsioCableDeviceId
+}
+
+if ($AsioExclusive -and $Mode -in @('Once', 'Monitor', 'AutoTest')) {
+    # Keep the Amazon app route aligned with the single supported user path.
+    # This makes direct PowerShell launches behave like the GUI and launchers,
+    # even when an older per-app Windows routing choice is still configured.
+    Assert-Tool
+    Invoke-SoundVolumeView /SetAppDefault $script:AsioCableDeviceId all 'Amazon Music.exe'
+}
+
+$script:DirectFollowsDefault = [bool]($Direct -and -not $DeviceId)
+
 if ($Direct) {
     Assert-Tool
     $bridgeProcesses = @(Get-Process -Name 'VBCABLE_AsioBridge' -ErrorAction SilentlyContinue)
@@ -1720,16 +2184,23 @@ if ($Direct) {
         Start-Sleep -Milliseconds 250
         Write-Log 'Direct mode: stopped the resident ASIO Bridge to release the Hi-Fi Cable path.' DarkGray
     }
-    $directDevice = Get-RenderDevices |
-        Where-Object { $_.'Default Multimedia' -eq 'Render' } |
-        Select-Object -First 1
-    if (-not $directDevice) {
-        $directDevice = Get-RenderDevices |
-            Where-Object { $_.Default -eq 'Render' } |
+    # An explicit GUI/CLI selection wins. With no DeviceId, Direct and
+    # Exclusive deliberately follow the current Windows default endpoint.
+    $directDevice = if ($DeviceId) {
+        Resolve-Device $DeviceId
+    } else {
+        $candidate = Get-RenderDevices |
+            Where-Object { $_.'Default Multimedia' -eq 'Render' } |
             Select-Object -First 1
+        if (-not $candidate) {
+            $candidate = Get-RenderDevices |
+                Where-Object { $_.Default -eq 'Render' } |
+                Select-Object -First 1
+        }
+        $candidate
     }
     if (-not $directDevice) {
-        throw 'Direct mode could not find the Windows default render endpoint.'
+        throw 'Direct mode could not resolve the requested render endpoint.'
     }
     $DeviceId = [string]$directDevice.'Command-Line Friendly ID'
     Invoke-SoundVolumeView /SetAppDefault $DeviceId all 'Amazon Music.exe'
@@ -1762,13 +2233,19 @@ switch ($Mode) {
         Show-Snapshot $snapshot
         if (-not $snapshot.Track) { throw 'The track format could not be determined.' }
         $device = Resolve-Device $DeviceId
+        Assert-AsioExclusiveDevice -Device $device
         Write-Host ("Target endpoint  : {0} ({1})" -f $device.Name, $device.'Default Format')
         if (-not $Apply) {
             Write-Log 'Dry run: no format was changed. Add -Apply to perform the switch.' Yellow
             break
         }
         $delay = if ($RestartDelayMs -gt 0) { $RestartDelayMs } else { [int]$config.restartDelayMs }
-        [void](Set-EndpointFormat -Device $device -Format $snapshot.Track -CurrentPlaying $snapshot.Playing -Channels ([int]$config.channels) -MuteDuringSwitch ([bool]$config.muteDuringSwitch) -WaitForRebuildSeconds ([int]$config.waitForRebuildSeconds) -RecoveryWaitSeconds ([int]$config.recoveryWaitSeconds) -Asin ([string]$snapshot.Asin) -RestartDelayMilliseconds $delay)
+        $onceSuccess = Set-EndpointFormat -Device $device -Format $snapshot.Track -CurrentPlaying $snapshot.Playing -Channels ([int]$config.channels) -WaitForRebuildSeconds ([int]$config.waitForRebuildSeconds) -RecoveryWaitSeconds ([int]$config.recoveryWaitSeconds) -Asin ([string]$snapshot.Asin) -RestartDelayMilliseconds $delay
+        if ($onceSuccess -and $script:ExclusiveMode -and $script:CdpEnabled -and $script:CdpWebSocketUrl) {
+            $onceExclusive = Set-AmazonCdpOutputMode -EnableExclusive $true -AmazonDeviceId ([string]$device.'Item ID') -ForceExclusiveCycle
+            if (-not $onceExclusive.Success) { throw "Amazon Exclusive could not be armed after the one-shot format change: $($onceExclusive.Reason)" }
+            Write-Log "Amazon Exclusive active after the one-shot format change on $($onceExclusive.Device)." Green
+        }
     }
     { $_ -in @('Monitor', 'AutoTest') } {
         Assert-Tool
@@ -1793,7 +2270,7 @@ switch ($Mode) {
         }
         if ($script:CdpEnabled) {
             if (-not (Initialize-AmazonCdp)) {
-                Write-Log "CDP unavailable: $script:CdpLastError; using the log/Previous fallback." Yellow
+                Write-Log "CDP unavailable: $script:CdpLastError; using log-based track detection." Yellow
             }
         }
         $trackPollMilliseconds = [int]$config.trackPollMilliseconds
@@ -1807,7 +2284,32 @@ switch ($Mode) {
         $logCursor = Get-AmazonLogLength
         $lastAsin = ''
         $monitorDevice = Resolve-Device $DeviceId
+        Assert-AsioExclusiveDevice -Device $monitorDevice
         $currentEndpointFormat = [string]$monitorDevice.'Default Format'
+        if ($script:CdpEnabled -and $script:CdpWebSocketUrl) {
+            if ($script:ExclusiveMode) {
+                $outputMode = Set-AmazonCdpOutputMode -EnableExclusive $true -AmazonDeviceId ([string]$monitorDevice.'Item ID')
+                if ($outputMode.Success) {
+                    Write-Log "Amazon output selected explicitly and Exclusive is active on $($outputMode.Device)." Green
+                } elseif ($outputMode.Pending) {
+                    Write-Log 'Amazon output selected explicitly; Exclusive will be armed when playback starts.' DarkGray
+                } else {
+                    Write-Log "Amazon Exclusive initialization failed: $($outputMode.Reason)" Yellow
+                }
+            } else {
+                $sharedAmazonDevice = if ($Direct -and -not $script:DirectFollowsDefault) {
+                    [string]$monitorDevice.'Item ID'
+                } else {
+                    'default'
+                }
+                $outputMode = Set-AmazonCdpOutputMode -EnableExclusive $false -AmazonDeviceId $sharedAmazonDevice
+                if (-not $outputMode.Success) {
+                    Write-Log "Amazon could not return to shared/default output mode: $($outputMode.Reason)" Yellow
+                }
+            }
+        } elseif ($script:ExclusiveMode) {
+            throw 'Exclusive mode requires a working Amazon CDP connection.'
+        }
         $testResults = New-Object Collections.ArrayList
         $finished = $false
         $autoTestWaitingForNext = $false
@@ -1840,7 +2342,7 @@ switch ($Mode) {
                     Write-Log 'AutoTest timed out waiting for the next-track event; stopping and preserving the current track.' Red
                     [void]$testResults.Add([pscustomobject]@{
                         Number=$testResults.Count+1; Asin='(next)'; Target='Unknown'; Success=$false
-                        UnexpectedAsin=''; ResyncSuccess=$false; ResyncTarget=''; UnmuteIssued=$false
+                        UnexpectedAsin=''; ResyncSuccess=$false; ResyncTarget=''; Resumed=$false
                         Timing=@{}; Reason='Next-track event timed out (the queue may be empty or autoplay may be disabled).'; Time=(Get-Date).ToString('o')
                     })
                     $finished = $true
@@ -1883,33 +2385,38 @@ switch ($Mode) {
                 if ($autoTest) { $autoTestWaitingForNext = $false }
                 $lastAsin = $asin
                 $trackTimer = [Diagnostics.Stopwatch]::StartNew()
+                # Capture the log boundary as soon as CDP reports the new ASIN;
+                # Track Initialization Succeeded can arrive while format and
+                # endpoint work is still in progress.
+                $correlationStart = Get-AmazonLogLength
                 $timing = @{}
-                $preMuted = $false
+                $pausedForSwitch = $false
+                $resumeSucceeded = $true
+                $resumeResult = $null
 
-                # Eliminate the audible head of the new song.  If its cached
-                # format already matches the endpoint there is no switch and no
-                # need to mute.  Unknown or different formats are muted before
-                # any catalog/log wait; direct Core Audio normally completes in
-                # 2-4 ms after this detection point.
-                if ($Apply -and [bool]$config.muteDuringSwitch) {
-                    $knownFormat = if ($verifiedFormats.ContainsKey($asin)) { $verifiedFormats[$asin] } elseif ($asinFormats.ContainsKey($asin)) { $asinFormats[$asin] } else { $null }
-                    $knownMatchesEndpoint = $knownFormat -and
-                        $currentEndpointFormat -match "(?i)\b$($knownFormat.Bits) bit\b" -and
-                        $currentEndpointFormat -match "\b$($knownFormat.RateHz) Hz\b"
-                    if (-not $knownMatchesEndpoint) {
-                        if (Set-EndpointMuteFast -Device $monitorDevice -Muted $true) {
-                            $preMuted = $true
-                            $timing['DetectionToMuteMs'] = [int]$trackTimer.ElapsedMilliseconds
-                            Write-Log 'Muted the endpoint immediately after the track change.' DarkGray
-                        } else {
-                            $timing['DetectionToMuteMs'] = [int]$trackTimer.ElapsedMilliseconds
-                            Write-Log 'Immediate endpoint mute failed; stopping this track switch.' Red
+                try {
+                    # Stop the newly selected track before changing the endpoint
+                    # format. The paused transport keeps the first sample from
+                    # advancing while Exclusive and the DAC are reopened.
+                    if ($Apply) {
+                        $playbackState = if ($cdpCurrent) { [string]$cdpCurrent.State } else { '' }
+                        $assumePlaying = $fromCdp
+                        if (-not $fromCdp) {
+                            try { $assumePlaying = Test-AmazonSessionActive $monitorDevice } catch { $assumePlaying = $false }
+                        }
+                        $pauseTimer = [Diagnostics.Stopwatch]::StartNew()
+                        $pauseResult = Pause-AmazonPlaybackForSwitch -State $playbackState -AssumePlaying:$assumePlaying
+                        $timing['PauseMs'] = [int]$pauseTimer.ElapsedMilliseconds
+                        if ($pauseResult.Changed) {
+                            $pausedForSwitch = $true
+                            Write-Log 'Paused Amazon immediately after the track change.' DarkGray
+                        } elseif (-not $pauseResult.Success) {
+                            throw "Could not pause Amazon before the sample-rate switch: $($pauseResult.Reason)"
                         }
                     }
-                }
 
                 if ($fromCdp) {
-                    $correlationStart = $logCursor
+                    if ($correlationStart -le 0) { $correlationStart = $logCursor }
                     $authoritativeFormat = $null
                     if ($verifiedFormats.ContainsKey($asin)) {
                         $format = $verifiedFormats[$asin]
@@ -1932,7 +2439,7 @@ switch ($Mode) {
                         # The renderer normally publishes audioAttributes within
                         # about 200-300 ms.  Keep a bounded CDP-first wait, then
                         # use the log as the ordering-safe fallback.
-                        $authoritativeFormat = Wait-AmazonCdpSettledTrackFormat -Asin $asin -TimeoutMilliseconds 350
+                        $authoritativeFormat = Wait-AmazonCdpSettledTrackFormat -Asin $asin -TimeoutMilliseconds 350 -AllowPaused:$Apply
                         if (-not $authoritativeFormat) {
                             $authoritativeFormat = Wait-AmazonCorrelatedTrackFormat `
                                 -Asin $asin -AfterOffset $correlationStart -TimeoutMilliseconds 700
@@ -1945,7 +2452,7 @@ switch ($Mode) {
                             # once before declaring the track unknown.  This is
                             # failure-path only and adds no cost to cache hits or
                             # the normal first-CDP success path.
-                            $authoritativeFormat = Wait-AmazonCdpSettledTrackFormat -Asin $asin -TimeoutMilliseconds 150
+                            $authoritativeFormat = Wait-AmazonCdpSettledTrackFormat -Asin $asin -TimeoutMilliseconds 150 -AllowPaused:$Apply
                         }
                     }
                     $newLength = Get-AmazonLogLength
@@ -1983,9 +2490,17 @@ switch ($Mode) {
                 }
                 if (-not $format) {
                     Write-Log "No format data for new track $asin within 0.9 seconds; the previous track's format will not be reused." Yellow
-                    if ($preMuted) {
-                        [void](Set-EndpointMuteFast -Device $monitorDevice -Muted $false)
-                        $script:LastUnmuteIssued = $true
+                    if ($pausedForSwitch) {
+                        $resumeTimer = [Diagnostics.Stopwatch]::StartNew()
+                        $resumeResult = Resume-AmazonPlaybackAfterSwitch -WasPaused $true -ExpectedAsin $asin -AmazonDeviceId ([string]$monitorDevice.'Item ID')
+                        $timing['ReplayMs'] = [int]$resumeResult.ReplayMs
+                        $timing['ReplaySoughtMs'] = [int64]$resumeResult.ReplaySoughtMs
+                        $timing['ReplayPositionMs'] = [int64]$resumeResult.ReplayPositionMs
+                        $timing['PauseAfterReplayMs'] = [int]$resumeResult.PauseAfterReplayMs
+                        $timing['ExclusiveMs'] = [int]$resumeResult.ExclusiveMs
+                        $timing['ResumeMs'] = [int]$resumeTimer.ElapsedMilliseconds
+                        $resumeSucceeded = [bool]$resumeResult.Success
+                        $pausedForSwitch = $false
                     }
                     if ($autoTest) {
                         [void]$testResults.Add([pscustomobject]@{ Number=$testResults.Count+1; Asin=$asin; Target='Unknown'; Success=$false; Reason='No format data within 0.9 seconds'; Time=(Get-Date).ToString('o') })
@@ -2005,116 +2520,96 @@ switch ($Mode) {
                 $endpointMatches = $before -match "(?i)\b$($format.Bits) bit\b" -and $before -match "\b$($format.RateHz) Hz\b"
                 $success = $false
                 $reason = ''
-                $script:LastUnmuteIssued = $true
                 $script:LastUnexpectedAsin = ''
                 $script:LastResyncSuccess = $false
                 $script:LastResyncTarget = ''
                 if ($endpointMatches) {
-                    Write-Log 'Endpoint already matches; no interruption or pause.' Green
-                    if ($preMuted) {
-                        $unmuteTimer = [Diagnostics.Stopwatch]::StartNew()
-                        $script:LastUnmuteIssued = Set-EndpointMuteFast -Device $monitorDevice -Muted $false
-                        $timing['UnmuteCommandMs'] = [int]$unmuteTimer.ElapsedMilliseconds
-                        $preMuted = $false
+                    Write-Log 'Endpoint already matches; resuming the paused same-format track immediately.' Green
+                    $exclusiveReady = $true
+                    $exclusiveFailure = ''
+
+                    # Format discovery happens after the track-change event, so
+                    # the new track was paused defensively above. Once the
+                    # endpoint is known to match, do not run the 5.5-second
+                    # seek/Previous replay path; resume this same-format track
+                    # immediately instead.
+                    if ($pausedForSwitch) {
+                        if ($script:ExclusiveMode -and $script:CdpEnabled -and $script:CdpWebSocketUrl) {
+                            $sameExclusiveTimer = [Diagnostics.Stopwatch]::StartNew()
+                            $sameExclusive = Set-AmazonCdpOutputMode -EnableExclusive $true -AmazonDeviceId ([string]$monitorDevice.'Item ID')
+                            $timing['ExclusiveMs'] = [int]$sameExclusiveTimer.ElapsedMilliseconds
+                            if (-not $sameExclusive.Success) {
+                                $exclusiveReady = $false
+                                $exclusiveFailure = [string]$sameExclusive.Reason
+                                Write-Log "Same-format track could not confirm Amazon Exclusive: $exclusiveFailure" Yellow
+                            }
+                        }
+
+                        $sameResumeTimer = [Diagnostics.Stopwatch]::StartNew()
+                        $sameResume = Resume-AmazonPlaybackImmediately -WasPaused $true
+                        $timing['ResumeMs'] = [int]$sameResumeTimer.ElapsedMilliseconds
+                        if (-not $sameResume.Success) {
+                            throw "Could not resume the same-format Amazon track: $($sameResume.Reason)"
+                        }
+                        $pausedForSwitch = $false
+                        Write-Log "Same-format track resumed immediately ($($sameResume.Method))." DarkGray
                     }
+
                     $stageTimer = [Diagnostics.Stopwatch]::StartNew()
-                    # Same-format tracks are already audible and do not need a
-                    # device switch.  The old path rescanned all five metadata
-                    # fields for up to 3 seconds, which blocked the monitor
-                    # from handling the next track even though no recovery was
-                    # needed.  CDP's ASIN + actual audioAttributes are the two
-                    # hard checks here; retain the old verifier only as a
-                    # bounded fallback for transient renderer updates.
-                    $verification = $null
-                    if ($script:CdpEnabled -and $script:CdpWebSocketUrl) {
-                        $sameFormatCdp = Wait-AmazonCdpFormat -Target $format -Asin $asin -TimeoutMilliseconds 900
-                        if ($sameFormatCdp) {
-                            $verification = [pscustomobject]@{
-                                Success = $true
-                                EndpointOk = $true
-                                TrackOk = $true
-                                CapabilityOk = $true
-                                PlayingOk = $true
-                                SelectedOk = $true
-                            }
-                            Write-Log 'Light same-format verification succeeded: CDP ASIN and actual playback format match.' DarkGray
-                        }
+                    # Same-format tracks do not renegotiate the endpoint. The
+                    # target format was already resolved for this ASIN and the
+                    # endpoint read-back matches it, so do not block playback on
+                    # Amazon's slower playback/stream telemetry. Switched tracks
+                    # still use the strict verifier after the endpoint rebuild.
+                    $verification = [pscustomobject]@{
+                        Success = [bool]$exclusiveReady
+                        EndpointOk = $true
+                        TrackOk = $true
+                        CapabilityOk = $true
+                        PlayingOk = $true
+                        SelectedOk = $true
                     }
-                    if (-not $verification -and $script:CdpEnabled -and $script:CdpWebSocketUrl) {
-                        # Same-format playback does not renegotiate a stream.
-                        # Amazon can lag briefly on playback/stream telemetry even
-                        # after its current ASIN, track format, and endpoint agree.
-                        # Treat that bounded metadata lag as a pass; switched
-                        # tracks still use the strict verifier below.
-                        $softSnapshot = Get-AmazonBackgroundSnapshot
-                        $softAsin = if ($softSnapshot) { [string]$softSnapshot.Asin } else { '' }
-                        $softTrackOk = $softSnapshot -and $softSnapshot.Track -and (Test-FormatMatch $softSnapshot.Track $format)
-                        $softDeviceOk = if ($softSnapshot -and $softSnapshot.DeviceCapability) {
-                            $softSnapshot.DeviceCapability.Bits -ge $format.Bits -and
-                            $softSnapshot.DeviceCapability.RateHz -ge $format.RateHz
-                        } else { $true }
-                        if ($softAsin -and $softAsin.ToUpperInvariant() -eq $asin.ToUpperInvariant() -and $softTrackOk -and $softDeviceOk) {
-                            $verification = [pscustomobject]@{
-                                Success = $true
-                                EndpointOk = $true
-                                TrackOk = $true
-                                CapabilityOk = $softDeviceOk
-                                PlayingOk = $false
-                                SelectedOk = $false
-                            }
-                            Write-Log 'Same-format telemetry lagged; current ASIN, track format, and endpoint agree, treating the track as PASS.' DarkGray
-                        }
-                    }
-                    if (-not $verification) {
-                        $verification = Wait-AmazonFormatVerified -Target $format -Asin $asin -TimeoutMilliseconds 1500
-                    }
+                    Write-Log 'Same-format track resumed; skipped blocking playback telemetry verification.' DarkGray
                     $timing['PlaybackFormatWaitMs'] = [int]$stageTimer.ElapsedMilliseconds
                     $success = $verification.Success
                     if ($success) {
-                        $reason = 'Same format; playback and endpoint verified'
+                        $reason = 'Same format; resumed without endpoint switch'
                     } else {
                         Write-Log ("Same-format verification incomplete: endpoint={0}, track={1}, device={2}, playback={3}, stream={4}" -f `
                             $verification.EndpointOk, $verification.TrackOk, $verification.CapabilityOk, $verification.PlayingOk, $verification.SelectedOk) Yellow
-                        $reason = 'Same format, but Amazon verification was incomplete (endpoint={0}, track={1}, device={2}, playback={3}, stream={4})' -f `
-                            $verification.EndpointOk, $verification.TrackOk, $verification.CapabilityOk, $verification.PlayingOk, $verification.SelectedOk
+                        $reason = if (-not $exclusiveReady) {
+                            "Same format, but Amazon Exclusive failed: $exclusiveFailure"
+                        } else {
+                            'Same format, but Amazon verification was incomplete (endpoint={0}, track={1}, device={2}, playback={3}, stream={4})' -f `
+                                $verification.EndpointOk, $verification.TrackOk, $verification.CapabilityOk, $verification.PlayingOk, $verification.SelectedOk
+                        }
                     }
                 } elseif (-not $Apply) {
                     Write-Log "Dry run: would switch to $($format.Bits)/$($format.RateHz)." Yellow
                     $success = $true
                     $reason = 'Dry run'
                 } else {
-                    # A seek to 00:00 is not a new Amazon playback instance and does
-                    # not reliably renegotiate the stream. Use the conservative
-                    # CDP uses native seek + Previous to preserve the existing
-                    # queue; the non-CDP fallback still waits for the safe gate.
+                    # The new track is paused before the endpoint change; after
+                    # the format switch, seek to about 5.5 seconds and use
+                    # Previous to restart the current track, then re-arm
+                    # Exclusive and resume. Previous is intentionally used only
+                    # after the safe five-second gate.
                     $delay = if ($RestartDelayMs -gt 0) { $RestartDelayMs } else { [int]$config.restartDelayMs }
                     $success = Set-EndpointFormat `
                         -Device $monitorDevice `
                         -Format $format `
                         -CurrentPlaying $null `
                         -Channels ([int]$config.channels) `
-                        -MuteDuringSwitch ([bool]$config.muteDuringSwitch) `
                         -WaitForRebuildSeconds ([int]$config.waitForRebuildSeconds) `
                         -RecoveryWaitSeconds ([int]$config.recoveryWaitSeconds) `
                         -Asin $asin `
                         -AsinFormats $asinFormats `
                         -RestartDelayMilliseconds $delay `
-                        -PreMuted $preMuted `
                         -Timing $timing
-                    if ($success -and -not $script:LastUnmuteIssued) {
-                        $success = $false
-                        $reason = 'Endpoint unmute command was not issued'
-                    }
                     if ($success) {
-                        $reason = 'Switch and five verification checks succeeded'
-                    } elseif ($script:LastUnexpectedAsin -and $script:LastResyncSuccess) {
-                        $reason = "Replay selected $($script:LastUnexpectedAsin); endpoint resynced to $($script:LastResyncTarget)"
-                    } elseif ($script:LastUnexpectedAsin) {
-                        $reason = "Replay selected $($script:LastUnexpectedAsin); endpoint resync failed"
-                    } elseif (-not $script:LastUnmuteIssued) {
-                        $reason = 'Endpoint unmute command was not issued'
+                        $reason = 'Sample-rate switch and one Exclusive cycle succeeded'
                     } else {
-                        $reason = 'Verification failed after the switch'
+                        $reason = 'Sample-rate switch or Exclusive re-arm failed'
                     }
                     if ($success) {
                         $currentEndpointFormat = '{0} Channel, {1} bit, {2} Hz' -f [int]$config.channels, [int]$format.Bits, [int]$format.RateHz
@@ -2123,21 +2618,50 @@ switch ($Mode) {
                     }
                 }
 
+                if ($pausedForSwitch) {
+                    $resumeTimer = [Diagnostics.Stopwatch]::StartNew()
+                    $resumeResult = Resume-AmazonPlaybackAfterSwitch -WasPaused $true -ExpectedAsin $asin -AmazonDeviceId ([string]$monitorDevice.'Item ID')
+                    $timing['ReplayMs'] = [int]$resumeResult.ReplayMs
+                    $timing['ReplaySoughtMs'] = [int64]$resumeResult.ReplaySoughtMs
+                    $timing['ReplayPositionMs'] = [int64]$resumeResult.ReplayPositionMs
+                    $timing['PauseAfterReplayMs'] = [int]$resumeResult.PauseAfterReplayMs
+                    $timing['ExclusiveMs'] = [int]$resumeResult.ExclusiveMs
+                    $timing['ResumeMs'] = [int]$resumeTimer.ElapsedMilliseconds
+                    if ($resumeResult.ReplaySuccess) {
+                        Write-Log "Seeked the paused Amazon track to $($resumeResult.ReplaySoughtMs) ms, then Previous returned it to $($resumeResult.ReplayPositionMs) ms ($($resumeResult.ReplayMode))." DarkGray
+                    } else {
+                        Write-Log "Could not confirm the 5.5-second seek and Previous restart before resume: $($resumeResult.ReplayReason)" Yellow
+                        $resumeSucceeded = $false
+                        $success = $false
+                        $reason = 'Could not confirm the 5.5-second seek and Previous restart before resume'
+                    }
+                    if ($resumeResult.Success) {
+                        Write-Log "Re-armed Exclusive after Previous and resumed Amazon ($($resumeResult.Reason))." DarkGray
+                        $pausedForSwitch = $false
+                    } else {
+                        $resumeSucceeded = $false
+                        $success = $false
+                        $reason = 'Could not restart the current track with Previous and resume Amazon'
+                        Write-Log "Could not resume Amazon after the switch: $($resumeResult.Reason)" Red
+                    }
+                }
+
                 $timing['TotalTrackMs'] = [int]$trackTimer.ElapsedMilliseconds
                 if ($script:ShowDetailedTiming) {
-                    Write-Log ("Stage timing ms: detect-to-mute={0}, format={1}, mute={2}, gate={3}, endpoint={4}, replay={5}, same-ASIN={6}, playback={7}, failure-resync={8}, unmute={9}, total={10}" -f `
-                        $timing['DetectionToMuteMs'], $timing['TrackEventToFormatMs'], $timing['MuteMs'], $timing['RestartGateMs'], $timing['EndpointFormatMs'], `
-                        $timing['ReplayRequestMs'], $timing['SameAsinWaitMs'], $timing['PlaybackFormatWaitMs'], $timing['FailureResyncMs'], `
-                        $timing['UnmuteCommandMs'], $timing['TotalTrackMs']) DarkGray
+                    Write-Log ("Stage timing ms: pause={0}, format={1}, endpoint={2}, replay={3} (sought={4}, reset={5}), pauseAfterPrevious={6}, exclusive={7}, resume={8}, total={9}" -f `
+                        $timing['PauseMs'], $timing['TrackEventToFormatMs'], $timing['EndpointFormatMs'], `
+                        $timing['ReplayMs'], $timing['ReplaySoughtMs'], $timing['ReplayPositionMs'], $timing['PauseAfterReplayMs'], `
+                        $timing['ExclusiveMs'], $timing['ResumeMs'], `
+                        $timing['TotalTrackMs']) DarkGray
                 } else {
                     Write-Log ("Track timing: total={0} ms" -f $timing['TotalTrackMs']) DarkGray
                 }
 
                 # Persist only after Amazon's actual playback format and the
-                # endpoint have both passed verification.  This avoids saving
+                # endpoint have both passed verification. This avoids saving
                 # the briefly stale previous-track attributes seen during a
-                # CDP track transition.  Cache I/O is deliberately outside the
-                # measured mute/switch/replay critical path.
+                # CDP track transition. Cache I/O stays outside the measured
+                # pause/switch/seek/play path.
                 if ($success -and $Apply) {
                     Save-VerifiedFormatCacheEntry -Map $verifiedFormats -Asin $asin -Format $format
                 }
@@ -2147,7 +2671,7 @@ switch ($Mode) {
                     [void]$testResults.Add([pscustomobject]@{
                         Number=$number; Asin=$asin; Target=$format.Text; Success=[bool]$success
                         UnexpectedAsin=$script:LastUnexpectedAsin; ResyncSuccess=[bool]$script:LastResyncSuccess
-                        ResyncTarget=$script:LastResyncTarget; UnmuteIssued=[bool]$script:LastUnmuteIssued
+                        ResyncTarget=$script:LastResyncTarget; Resumed=[bool]$resumeSucceeded
                         Timing=$timing; Reason=$reason; Time=(Get-Date).ToString('o')
                     })
                     $color = if ($success) { 'Green' } else { 'Red' }
@@ -2166,6 +2690,18 @@ switch ($Mode) {
                         }
                         $autoTestWaitingForNext = $true
                         $autoTestNextDeadline = (Get-Date).AddSeconds(10)
+                    }
+                }
+                }
+                finally {
+                    if ($pausedForSwitch) {
+                        $resumeResult = Resume-AmazonPlaybackAfterSwitch -WasPaused $true -ExpectedAsin $asin -AmazonDeviceId ([string]$monitorDevice.'Item ID')
+                        $pausedForSwitch = $false
+                        if ($resumeResult.Success) {
+                            Write-Log 'Recovery resume completed after an interrupted paused switch.' Yellow
+                        } else {
+                            Write-Log "Recovery resume failed: $($resumeResult.Reason)" Red
+                        }
                     }
                 }
             } catch {
@@ -2223,7 +2759,7 @@ switch ($Mode) {
             }
             $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
             Write-Host ''
-            $testResults | Format-Table Number, Asin, Target, Success, UnmuteIssued, Reason -AutoSize
+            $testResults | Format-Table Number, Asin, Target, Success, Resumed, Reason -AutoSize
             if ($null -ne $averageSuccessfulTrackMs) {
                 Write-Log ("AutoTest latency: average successful track={0} ms; switched={1} ms; same-format={2} ms." -f `
                     $averageSuccessfulTrackMs, $averageSuccessfulSwitchMs, $averageSuccessfulSameFormatMs) DarkGray
