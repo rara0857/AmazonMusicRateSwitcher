@@ -12,6 +12,10 @@ Rate Switcher 會讀取歌曲格式並自動切換，盡量減少不必要的 SR
   <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Changer 桌面程式">
 </p>
 
+<p align="center">
+  <img src="assets/process.gif?v=20260828" width="640" alt="Amazon Music Rate Switcher 實際操作畫面">
+</p>
+
 ## Features
 
 - 依照每首歌自動切換 bit depth 與 sample rate。

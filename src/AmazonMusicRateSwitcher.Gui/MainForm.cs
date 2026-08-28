@@ -1393,7 +1393,7 @@ internal sealed class MainForm : Form
         _statusDetail.Text = "Skipped incomplete track data";
     }
 
-    private async Task LoadArtworkAsync(string artworkUrl)
+    private async Task LoadArtworkAsync(string artworkUrl, bool retryAfterFailure = true)
     {
         var requestVersion = Interlocked.Increment(ref _artworkRequestVersion);
         if (string.IsNullOrWhiteSpace(artworkUrl))
@@ -1402,29 +1402,84 @@ internal sealed class MainForm : Form
             return;
         }
 
-        artworkUrl = NormalizeArtworkUrl(artworkUrl);
-        for (var attempt = 0; attempt < 3; attempt++)
+        // Amazon can expose the same cover through a WebP transform, a resized
+        // JPEG transform, or the alternate image CDN host. Try the inexpensive
+        // JPEG variants before leaving the new track on the placeholder.
+        foreach (var candidate in BuildArtworkCandidates(artworkUrl))
         {
-            try
+            for (var attempt = 0; attempt < 2; attempt++)
             {
-                var bytes = await ArtworkClient.GetByteArrayAsync(artworkUrl, _lifetime.Token);
-                using var stream = new MemoryStream(bytes);
-                using var source = Image.FromStream(stream);
-                SetArtwork(new Bitmap(source), requestVersion);
-                return;
-            }
-            catch when (attempt < 2 && !_lifetime.IsCancellationRequested)
-            {
-                await Task.Delay(350 * (attempt + 1), _lifetime.Token);
-            }
-            catch
-            {
-                break;
+                try
+                {
+                    var bytes = await ArtworkClient.GetByteArrayAsync(candidate, _lifetime.Token);
+                    using var stream = new MemoryStream(bytes);
+                    using var source = Image.FromStream(stream);
+                    SetArtwork(new Bitmap(source), requestVersion);
+                    return;
+                }
+                catch when (attempt == 0 && !_lifetime.IsCancellationRequested)
+                {
+                    await Task.Delay(250, _lifetime.Token);
+                }
+                catch
+                {
+                    break;
+                }
             }
         }
 
         // Keep the current image. A later CDP snapshot can publish a refreshed
         // artwork URL without making the cover flash back to a placeholder.
+        // Also give a transient CDN failure one delayed retry; the retry is
+        // cancelled automatically when another track increments the request
+        // version.
+        if (retryAfterFailure && requestVersion == _artworkRequestVersion && !_lifetime.IsCancellationRequested)
+        {
+            try { await Task.Delay(1000, _lifetime.Token); }
+            catch { return; }
+            if (requestVersion == _artworkRequestVersion && !_lifetime.IsCancellationRequested)
+                _ = LoadArtworkAsync(artworkUrl, false);
+        }
+    }
+
+    private static IReadOnlyList<string> BuildArtworkCandidates(string artworkUrl)
+    {
+        var candidates = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Add(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value) ||
+                !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                return;
+            var normalized = NormalizeArtworkUrl(uri.ToString());
+            if (seen.Add(normalized))
+                candidates.Add(normalized);
+        }
+
+        Add(artworkUrl);
+        if (!Uri.TryCreate(artworkUrl, UriKind.Absolute, out var sourceUri))
+            return candidates;
+
+        var basePath = Regex.Replace(
+            sourceUri.AbsolutePath,
+            @"\._[^/]+(?=\.[^./]+$)",
+            string.Empty,
+            RegexOptions.IgnoreCase);
+        if (!string.Equals(basePath, sourceUri.AbsolutePath, StringComparison.Ordinal))
+        {
+            var builder = new UriBuilder(sourceUri) { Path = basePath };
+            Add(builder.Uri.ToString());
+        }
+
+        if (string.Equals(sourceUri.Host, "m.media-amazon.com", StringComparison.OrdinalIgnoreCase))
+        {
+            var builder = new UriBuilder(sourceUri) { Host = "images-na.ssl-images-amazon.com" };
+            Add(builder.Uri.ToString());
+        }
+
+        return candidates;
     }
 
     private static string NormalizeArtworkUrl(string artworkUrl)
@@ -1432,7 +1487,8 @@ internal sealed class MainForm : Form
         // Amazon frequently labels a WebP response as a .jpg URL by inserting
         // _FMwebp_ in the image transform. System.Drawing cannot decode WebP;
         // the equivalent _SX..._ URL returns an actual JPEG from the same CDN.
-        return Regex.Replace(artworkUrl, "_FMwebp_", "_", RegexOptions.IgnoreCase);
+        var normalized = Regex.Replace(artworkUrl, "_FMwebp_", "_", RegexOptions.IgnoreCase);
+        return Regex.Replace(normalized, @"\.webp(?=$|[?#])", ".jpg", RegexOptions.IgnoreCase);
     }
 
     private static HttpClient CreateArtworkClient()
