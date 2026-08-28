@@ -45,7 +45,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\AmazonMusicRat
 
 GUI 的 `TEST & Config` 頁面可設定測試歌曲數量。AutoTest 會逐首檢查歌曲格式、端點格式、Exclusive 狀態和播放狀態，只有當前歌曲完成驗證後才進入下一首，並將結果寫入 `state/auto-test-latest.json` 與 `state/auto-test-summary.json`。
 
-Latency 摘要改用實際恢復播放當下的 `PlaybackReadyMs`；詳細結果仍保留稍後完成驗證的 `TotalTrackMs`。若要查看兩者與各階段時間，可在 `config.json` 將 `showDetailedTiming` 設為 `true`。
+Latency 摘要使用 Amazon 回報目標 Playing format 已生效時的 `PlaybackConfirmedMs`。詳細結果另外保留 Play 指令被接受的 `PlaybackCommandMs` 與驗證完成的 `TotalTrackMs`。若要查看這些數值與各階段時間，可在 `config.json` 將 `showDetailedTiming` 設為 `true`。
 
 `state` 目錄包含裝置備份、測試結果、runtime state 與 v4 已驗證格式 cache。資料只來自與 ASIN 關聯的最終資料，不使用過期的 playback attributes。程式也能重用相同 ASIN 先前已完成 TrackBuilder instance 的完整品質列表；這和受目前端點限制的 selected fragment 不同，manifest 列表代表該歌曲實際提供的所有來源格式。兩者都沒有時，程式才會只靜音 Amazon、短暫初始化當前歌曲，再暫停並 seek 0 後保存確認結果。播放恢復後若驗證不符會自動刪除，舊版 cache 不會匯入。此目錄只保留在本機，不加入 Git。
 

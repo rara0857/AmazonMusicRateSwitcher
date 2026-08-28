@@ -45,7 +45,7 @@ For different-format switches, most latency comes from rebuilding the Windows au
 
 The GUI `TEST & Config` page selects the number of tracks. AutoTest checks each track's format, endpoint format, Exclusive state, and playback state, advances only after the current track is verified, then writes `state/auto-test-latest.json` and `state/auto-test-summary.json`.
 
-Latency summaries use `PlaybackReadyMs`, measured when playback has actually resumed. `TotalTrackMs` remains available in the detailed result as the later verification-complete time. Set `showDetailedTiming` to `true` in `config.json` to log both values and all stage timings.
+Latency summaries use `PlaybackConfirmedMs`, measured when Amazon reports the expected active Playing format after a switch. Detailed results also retain `PlaybackCommandMs` (when the Play command was accepted) and `TotalTrackMs` (verification completion). Set `showDetailedTiming` to `true` in `config.json` to log these values and all stage timings.
 
 The `state` directory contains the device backup, test results, runtime state, and the v4 verified-format cache. Entries come from ASIN-correlated final data, never stale playback attributes. The resolver can also reuse the complete quality list from an earlier successful TrackBuilder instance of the exact ASIN; unlike endpoint-selected fragment telemetry, that manifest list describes every source format offered for the track. When neither source is available, the app briefly initializes the current track while Amazon itself is muted, pauses and seeks back to zero, then caches the confirmed result. Post-resume mismatches remove the entry, and older cache schemas are never imported. The directory remains local and is excluded from Git.
 

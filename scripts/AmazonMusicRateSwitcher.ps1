@@ -2853,7 +2853,7 @@ switch ($Mode) {
                         Write-Log 'Same-format track stayed playing; no pause or replay was needed.' DarkGray
                     }
 
-                    $timing['PlaybackReadyMs'] = [int]$trackTimer.ElapsedMilliseconds
+                    $timing['PlaybackCommandMs'] = [int]$trackTimer.ElapsedMilliseconds
 
                     $stageTimer = [Diagnostics.Stopwatch]::StartNew()
                     # Same-format tracks do not renegotiate the endpoint. The
@@ -2957,7 +2957,7 @@ switch ($Mode) {
                         Write-Log "Re-armed Exclusive after Previous and resumed Amazon ($($resumeResult.Reason))." DarkGray
                         $resumedForSwitch = $true
                         $pausedForSwitch = $false
-                        $timing['PlaybackReadyMs'] = [int]$trackTimer.ElapsedMilliseconds
+                        $timing['PlaybackCommandMs'] = [int]$trackTimer.ElapsedMilliseconds
                     } else {
                         $resumeSucceeded = $false
                         $success = $false
@@ -3048,17 +3048,26 @@ switch ($Mode) {
                 }
 
                 $timing['TotalTrackMs'] = [int]$trackTimer.ElapsedMilliseconds
-                if (-not $timing.ContainsKey('PlaybackReadyMs')) {
-                    $timing['PlaybackReadyMs'] = $timing['TotalTrackMs']
+                if (-not $timing.ContainsKey('PlaybackCommandMs')) {
+                    $timing['PlaybackCommandMs'] = $timing['TotalTrackMs']
+                }
+                # Switched (and fallback-paused same-format) tracks are only
+                # audibly ready once strict Playing-format verification ends.
+                # Same-format tracks that never paused were already playing at
+                # the command checkpoint.
+                $timing['PlaybackConfirmedMs'] = if ($resumedForSwitch) {
+                    $timing['TotalTrackMs']
+                } else {
+                    $timing['PlaybackCommandMs']
                 }
                 if ($script:ShowDetailedTiming) {
-                    Write-Log ("Stage timing ms: pause={0}, format={1}, endpoint={2}, replay={3} (readyWait={4}, sought={5}, reset={6}), pauseAfterPrevious={7}, exclusive={8}, resume={9}, playbackReady={10}, verified={11}" -f `
+                    Write-Log ("Stage timing ms: pause={0}, format={1}, endpoint={2}, replay={3} (readyWait={4}, sought={5}, reset={6}), pauseAfterPrevious={7}, exclusive={8}, resume={9}, playCommand={10}, playbackConfirmed={11}" -f `
                         $timing['PauseMs'], $timing['TrackEventToFormatMs'], $timing['EndpointFormatMs'], `
                         $timing['ReplayMs'], $timing['ReplayReadyWaitMs'], $timing['ReplaySoughtMs'], $timing['ReplayPositionMs'], $timing['PauseAfterReplayMs'], `
                         $timing['ExclusiveMs'], $timing['ResumeMs'], `
-                        $timing['PlaybackReadyMs'], $timing['TotalTrackMs']) DarkGray
+                        $timing['PlaybackCommandMs'], $timing['PlaybackConfirmedMs']) DarkGray
                 } else {
-                    Write-Log ("Track timing: playback ready={0} ms; verification complete={1} ms" -f $timing['PlaybackReadyMs'], $timing['TotalTrackMs']) DarkGray
+                    Write-Log ("Track timing: play command={0} ms; playback confirmed={1} ms" -f $timing['PlaybackCommandMs'], $timing['PlaybackConfirmedMs']) DarkGray
                 }
 
                 if ($autoTest) {
@@ -3118,9 +3127,10 @@ switch ($Mode) {
             $successfulSameFormatResults = @($successfulResults | Where-Object {
                 [int]$_.Timing.EndpointFormatMs -le 0
             })
-            $successfulTrackValues = @($successfulResults | ForEach-Object { [double]$_.Timing.PlaybackReadyMs })
-            $successfulSwitchValues = @($successfulSwitchResults | ForEach-Object { [double]$_.Timing.PlaybackReadyMs })
-            $successfulSameFormatValues = @($successfulSameFormatResults | ForEach-Object { [double]$_.Timing.PlaybackReadyMs })
+            $successfulTrackValues = @($successfulResults | ForEach-Object { [double]$_.Timing.PlaybackConfirmedMs })
+            $successfulSwitchValues = @($successfulSwitchResults | ForEach-Object { [double]$_.Timing.PlaybackConfirmedMs })
+            $successfulSameFormatValues = @($successfulSameFormatResults | ForEach-Object { [double]$_.Timing.PlaybackConfirmedMs })
+            $successfulCommandValues = @($successfulResults | ForEach-Object { [double]$_.Timing.PlaybackCommandMs })
             $successfulVerificationValues = @($successfulResults | ForEach-Object { [double]$_.Timing.TotalTrackMs })
             $averageSuccessfulTrackMs = if ($successfulResults.Count -gt 0) {
                 [Math]::Round([double](@($successfulTrackValues | Measure-Object -Average).Average), 1)
@@ -3133,6 +3143,9 @@ switch ($Mode) {
             } else { $null }
             $averageSuccessfulVerificationMs = if ($successfulResults.Count -gt 0) {
                 [Math]::Round([double](@($successfulVerificationValues | Measure-Object -Average).Average), 1)
+            } else { $null }
+            $averageSuccessfulCommandMs = if ($successfulResults.Count -gt 0) {
+                [Math]::Round([double](@($successfulCommandValues | Measure-Object -Average).Average), 1)
             } else { $null }
             $summaryPath = Join-Path $script:StateDirectory 'auto-test-summary.json'
             $failureDetails = @($testResults | Where-Object { -not $_.Success } | ForEach-Object {
@@ -3153,6 +3166,7 @@ switch ($Mode) {
                 AverageSuccessfulTrackMs = $averageSuccessfulTrackMs
                 AverageSuccessfulSwitchMs = $averageSuccessfulSwitchMs
                 AverageSuccessfulSameFormatMs = $averageSuccessfulSameFormatMs
+                AverageSuccessfulPlayCommandMs = $averageSuccessfulCommandMs
                 AverageSuccessfulVerificationCompleteMs = $averageSuccessfulVerificationMs
                 Failures = $failureDetails
                 ResultsFile = 'auto-test-latest.json'
