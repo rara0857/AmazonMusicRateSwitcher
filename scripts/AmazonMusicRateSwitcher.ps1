@@ -2562,12 +2562,17 @@ switch ($Mode) {
         if ($autoTest) {
             $amazonAlreadyRunning = @(Get-Process -Name 'Amazon Music' -ErrorAction SilentlyContinue).Count -gt 0
             if ($amazonAlreadyRunning) {
-                # Preserve the current playback position and queue.  A running
-                # non-debug instance cannot acquire a CDP port retroactively;
-                # in that case AutoTest keeps it alive and uses the existing
-                # log/media-command fallback instead of restarting it.
-                $script:CdpAllowLaunch = $false
-                Write-Log 'AutoTest found an existing Amazon process; reusing it without restarting.' DarkGray
+                # A normal Amazon process cannot acquire a CDP port
+                # retroactively. When CDP launch was requested (the GUI and
+                # bundled launcher both pass -CdpLaunch), Initialize-AmazonCdp
+                # will reuse an existing debug port or perform one controlled
+                # relaunch. Only a caller that explicitly omitted launch is
+                # kept on the no-restart fallback path.
+                if ($script:CdpAllowLaunch) {
+                    Write-Log 'AutoTest found an existing Amazon process; will reuse CDP or perform one controlled relaunch.' DarkGray
+                } else {
+                    Write-Log 'AutoTest found an existing Amazon process; reusing it without restarting because CDP launch was not requested.' DarkGray
+                }
             } else {
                 # AutoTest is often launched from its .cmd while Amazon is
                 # closed.  Permit one Store/CDP launch even when the caller did
@@ -2636,7 +2641,8 @@ switch ($Mode) {
                 }
             }
         } elseif ($script:ExclusiveMode) {
-            throw 'Exclusive mode requires a working Amazon CDP connection.'
+            $detail = if ($script:CdpLastError) { " $script:CdpLastError" } else { '' }
+            throw "Exclusive mode requires a working Amazon CDP connection.$detail"
         }
         $testResults = New-Object Collections.ArrayList
         $finished = $false
