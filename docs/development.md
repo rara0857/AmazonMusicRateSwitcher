@@ -54,10 +54,10 @@ The `state` directory contains the device backup, test results, runtime state, a
 Install the .NET 6 Windows Desktop SDK, then publish a self-contained x64 portable build:
 
 ```powershell
-dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\rate-fix-v1.0.0 --nologo
+dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\rate-fix-v1.0.1 --nologo
 ```
 
-The output is written to `artifacts/rate-fix-v1.0.0/`; the single published binary is `AmazonMusicRateSwitcher.exe`. The GUI still locates the repository's `scripts` directory at runtime, so the binary is single-file but the application is not yet a script-free standalone package.
+The output is written to `artifacts/rate-fix-v1.0.1/`; the single published binary is `AmazonMusicRateSwitcher.exe`. The GUI still locates the repository's `scripts` directory at runtime, so the binary is single-file but the application is not yet a script-free standalone package.
 
 ## Repository layout
 

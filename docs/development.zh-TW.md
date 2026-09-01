@@ -54,10 +54,10 @@ Latency 摘要使用 Amazon 回報目標 Playing format 已生效時的 `Playbac
 安裝 .NET 6 Windows Desktop SDK 後，執行以下指令產生 self-contained x64 portable build：
 
 ```powershell
-dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\rate-fix-v1.0.0 --nologo
+dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\rate-fix-v1.0.1 --nologo
 ```
 
-輸出位於 `artifacts/rate-fix-v1.0.0/`，發布結果只有 `AmazonMusicRateSwitcher.exe`。目前 GUI 執行時仍會尋找 repository 內的 `scripts`，因此 binary 是單檔，但整個應用尚不是不依賴 scripts 的完全獨立封裝。
+輸出位於 `artifacts/rate-fix-v1.0.1/`，發布結果只有 `AmazonMusicRateSwitcher.exe`。目前 GUI 執行時仍會尋找 repository 內的 `scripts`，因此 binary 是單檔，但整個應用尚不是不依賴 scripts 的完全獨立封裝。
 
 ## Repository 結構
 
