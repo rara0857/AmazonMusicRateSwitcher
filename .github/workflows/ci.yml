@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Validate PowerShell syntax
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem scripts -Filter *.ps1 -Recurse | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $errors | Format-List
+            }
+          }
+          if ($failed) { throw 'PowerShell parser validation failed.' }
+
+      - name: Restore
+        run: dotnet restore AmazonMusicRateSwitcher.sln
+
+      - name: Build
+        run: dotnet build AmazonMusicRateSwitcher.sln -c Release --no-restore --nologo -warnaserror
+
+      - name: Test
+        run: dotnet test AmazonMusicRateSwitcher.sln -c Release --no-build --nologo
+
+      - name: Validate release package
+        shell: powershell
+        run: .\scripts\Build-Release.ps1 -ArtifactsDirectory .\artifacts\ci
+
+      - name: Upload validated package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmazonMusicRateSwitcher-win-x64
+          path: artifacts/ci/*.zip
+          if-no-files-found: error

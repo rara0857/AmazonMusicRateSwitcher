@@ -17,6 +17,6 @@ Desktop.ini
 /assets/*_old.png
 
 # Build and publish output.
-/src/AmazonMusicRateSwitcher.Gui/bin/
-/src/AmazonMusicRateSwitcher.Gui/obj/
+**/bin/
+**/obj/
 /artifacts/
