@@ -39,29 +39,31 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\AmazonMusicRat
 3. 同格式歌曲：播放與 Exclusive 都維持原狀，不執行暫停、seek、Previous、端點重建或 output-mode cycle。
 4. 不同格式歌曲：暫停 → 調整 Hi-Fi Cable 格式 → 等待端點讀回 → seek 到 4.5 秒 → 立即按 Previous 回到目前歌曲開頭 → 確認仍在暫停狀態 → 重新啟用 Exclusive → 播放。seek 與 Previous 之間不再阻塞等待，只在播放前確認 Previous 後的狀態。
 
-不同格式切換的主要延遲通常來自 Windows audio endpoint／DAC 重建；同格式切換的 latency 則只包含格式偵測、暫停與恢復播放路徑。
+同格式歌曲只包含切換器的格式辨識與端點讀回成本，不會暫停或恢復播放。不同格式時間另外包含端點配對重設、Previous 重播、Exclusive 重新啟用及播放後嚴格驗證。Amazon 自身的 stream 啟動時間仍會波動，因此與切換器控制完成時間分開計算。
 
 ## AutoTest 與報告
 
 GUI 的 `TEST & Config` 頁面可設定測試歌曲數量。AutoTest 會逐首檢查歌曲格式、端點格式、Exclusive 狀態和播放狀態，只有當前歌曲完成驗證後才進入下一首，並將結果寫入 `state/auto-test-latest.json` 與 `state/auto-test-summary.json`。
 
-Latency 摘要使用 Amazon 回報目標 Playing format 已生效時的 `PlaybackConfirmedMs`。詳細結果另外保留 Play 指令被接受的 `PlaybackCommandMs` 與驗證完成的 `TotalTrackMs`。若要查看這些數值與各階段時間，可在 `config.json` 將 `showDetailedTiming` 設為 `true`。
+時間摘要不再混合不同語意的檢查點。`AverageSuccessfulSwitcherReadyMs` 是整體控制流程平均時間；`AverageSuccessfulSameFormatDecisionMs` 是同格式快速路徑平均時間；`AverageSuccessfulDifferentFormatMs` 是不同格式切換平均時間。`AverageSuccessfulSwitchConfirmedMs` 仍保留在 JSON 供嚴格 Playing-format 診斷使用；`AverageSuccessfulVerificationCompleteMs` 則是報告驗證完成時間。若要查看各階段，可在 `config.json` 將 `showDetailedTiming` 設為 `true`。
 
 `state` 目錄包含裝置備份、測試結果、runtime state 與 v4 已驗證格式 cache。資料只來自與 ASIN 關聯的最終資料，不使用過期的 playback attributes。程式也能重用相同 ASIN 先前已完成 TrackBuilder instance 的完整品質列表；這和受目前端點限制的 selected fragment 不同，manifest 列表代表該歌曲實際提供的所有來源格式。兩者都沒有時，程式才會只靜音 Amazon、短暫初始化當前歌曲，再暫停並 seek 0 後保存確認結果。播放恢復後若驗證不符會自動刪除，舊版 cache 不會匯入。此目錄只保留在本機，不加入 Git。
 
 ## Build
 
-安裝 .NET 6 Windows Desktop SDK 後，執行以下指令產生 self-contained x64 portable build：
+安裝 .NET 10 Windows Desktop SDK；repository 內的 `global.json` 會選擇受支援的 SDK feature band。執行以下指令測試並建立經驗證的 self-contained x64 套件：
 
 ```powershell
-dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\rate-fix-v1.0.1 --nologo
+dotnet test .\AmazonMusicRateSwitcher.sln -c Release
+.\scripts\Build-Release.ps1
 ```
 
-輸出位於 `artifacts/rate-fix-v1.0.1/`，發布結果只有 `AmazonMusicRateSwitcher.exe`。目前 GUI 執行時仍會尋找 repository 內的 `scripts`，因此 binary 是單檔，但整個應用尚不是不依賴 scripts 的完全獨立封裝。
+發版腳本會從 GUI project 讀取版本、發布單一 EXE、加入必要的 `config.json` 與三個 runtime script，並拒絕包含缺漏或額外檔案的 ZIP。GUI 執行時仍會尋找相鄰的 `scripts` 目錄，因此 binary 是單檔，但整個應用尚不是不依賴 scripts 的完全獨立封裝。
 
 ## Repository 結構
 
 - `src`：可維護的 WinForms GUI source
+- `tests`：GUI／backend typed protocol 的單元測試
 - `scripts`：PowerShell backend、setup 與 ASIO Bridge 管理腳本
 - `scripts/launchers`：正式啟動與 AutoTest 的 CMD launcher
 - `assets`：README 使用的圖片
@@ -69,12 +71,13 @@ dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csp
 - `artifacts`：本機 build output，不加入 Git
 - `state`：裝置備份、runtime state 與測試報告，不加入 Git
 - `tools/SoundVolumeView`：由 setup script 下載到本機，不加入 Git
+- `.github`：PR build、測試、相依套件更新及 release package 驗證
 
 ## 測試環境
 
 - Windows 11 64 位元，build 26200
 - Amazon Music Store package 9.5.2.0／executable 9.5.2.2478
 - PowerShell 5.1
-- .NET 6 Windows Desktop SDK
+- .NET 10 Windows Desktop SDK
 - VB-Audio Hi-Fi Cable
 - ASIO4ALL & FiiO ASIO Driver

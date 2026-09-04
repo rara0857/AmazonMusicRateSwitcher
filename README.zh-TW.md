@@ -9,7 +9,7 @@ Rate Switcher 會讀取歌曲格式並自動切換，盡量減少不必要的 SR
 **Audio path： Amazon Music Exclusive → Hi-Fi Cable → ASIO Bridge → DAC**
 
 <p align="center">
-  <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Changer 桌面程式">
+  <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Switcher 桌面程式">
 </p>
 
 <p align="center">
@@ -36,17 +36,19 @@ flowchart LR
 
 ## 快速開始
 
-1. 安裝 [VB-Audio Hi-Fi CABLE & ASIO Bridge](https://vb-audio.com/Cable/)
-2. 安裝 DAC ASIO Driver 或 [ASIO4ALL](https://asio4all.org/about/download-asio4all/)。
-3. 下載 [latest release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases)，執行 `AmazonMusicRateSwitcher.exe`。
-4. 在 ASIO Bridge 選好 ASIO Driver，按 **START**。
+1. 安裝官方 Amazon Music for Windows 桌面版並登入。
+2. 安裝 [VB-Audio Hi-Fi CABLE & ASIO Bridge](https://vb-audio.com/Cable/)
+3. 安裝 DAC ASIO Driver 或 [ASIO4ALL](https://asio4all.org/about/download-asio4all/)。
+4. 下載並完整解壓縮 [latest release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases)，保持 EXE、`config.json` 與 `scripts` 資料夾位於同一層，再執行 `AmazonMusicRateSwitcher.exe`。
+5. 在 ASIO Bridge 選好 ASIO Driver，按 **START**。
 
 執行 Test 前，請先開始播放，並確認 queue 後面至少還有 10 首可播放歌曲。
 
 ## 注意事項
 
-- 格式變更通常會增加約 0.5～2 秒；同格式歌曲會立即開始。
-- 啟用 CDP／Debug mode 時，程式可能會先關閉再重新開啟 Amazon Music 視窗一次，以建立控制連線。
+- 格式變更通常會增加約 0.5～2 秒。同格式歌曲不會增加端點切換時間，但 Amazon 本身的播放啟動時間仍可能波動。
+- 有可用的 Debug／CDP 連線時會直接沿用；沒有時，程式可能會關閉並重新開啟 Amazon Music 一次以建立連線。
+- 首次設定會下載核准的 SoundVolumeView v2.53，並在安裝前驗證 SHA-256。
 - 測試環境：Windows 11 x64、Amazon Music for Windows 9.5.2.0。
 
 ## Credit

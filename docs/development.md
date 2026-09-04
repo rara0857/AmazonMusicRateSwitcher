@@ -39,29 +39,31 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\AmazonMusicRat
 3. Same-format track: leave playback and Exclusive untouched. No pause, seek, Previous, endpoint rebuild, or output-mode cycle is used.
 4. Different-format track: pause → change the Hi-Fi Cable format → wait for endpoint read-back → seek to 4.5 seconds → immediately press Previous to restart the current track → confirm it remains paused → re-arm Exclusive → play. There is no blocking wait between seek and Previous; the post-Previous state is confirmed before playback resumes.
 
-For different-format switches, most latency comes from rebuilding the Windows audio endpoint/DAC. Same-format latency only covers format detection, pause, and resume.
+Same-format tracks only pay the switcher's detection and endpoint read-back cost; they are not paused or resumed. Different-format timing also includes endpoint-pair reconfiguration, the Previous restart, Exclusive re-arm, and strict post-playback verification. Amazon's own stream startup remains variable and is reported separately from the switcher's control checkpoint.
 
 ## AutoTest and reports
 
 The GUI `TEST & Config` page selects the number of tracks. AutoTest checks each track's format, endpoint format, Exclusive state, and playback state, advances only after the current track is verified, then writes `state/auto-test-latest.json` and `state/auto-test-summary.json`.
 
-Latency summaries use `PlaybackConfirmedMs`, measured when Amazon reports the expected active Playing format after a switch. Detailed results also retain `PlaybackCommandMs` (when the Play command was accepted) and `TotalTrackMs` (verification completion). Set `showDetailedTiming` to `true` in `config.json` to log these values and all stage timings.
+Timing summaries intentionally keep unlike checkpoints separate. `AverageSuccessfulSwitcherReadyMs` is the overall control-pipeline average, `AverageSuccessfulSameFormatDecisionMs` is the same-format fast-path average, and `AverageSuccessfulDifferentFormatMs` is the different-format switch average. `AverageSuccessfulSwitchConfirmedMs` remains in the JSON for strict switched-track Playing-format diagnostics, while `AverageSuccessfulVerificationCompleteMs` covers report completion. Set `showDetailedTiming` to `true` in `config.json` to log each stage.
 
 The `state` directory contains the device backup, test results, runtime state, and the v4 verified-format cache. Entries come from ASIN-correlated final data, never stale playback attributes. The resolver can also reuse the complete quality list from an earlier successful TrackBuilder instance of the exact ASIN; unlike endpoint-selected fragment telemetry, that manifest list describes every source format offered for the track. When neither source is available, the app briefly initializes the current track while Amazon itself is muted, pauses and seeks back to zero, then caches the confirmed result. Post-resume mismatches remove the entry, and older cache schemas are never imported. The directory remains local and is excluded from Git.
 
 ## Build
 
-Install the .NET 6 Windows Desktop SDK, then publish a self-contained x64 portable build:
+Install the .NET 10 Windows Desktop SDK. The repository `global.json` selects the supported SDK feature band. Build, test, and create the validated self-contained x64 package with:
 
 ```powershell
-dotnet publish .\src\AmazonMusicRateSwitcher.Gui\AmazonMusicRateSwitcher.Gui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\rate-fix-v1.0.1 --nologo
+dotnet test .\AmazonMusicRateSwitcher.sln -c Release
+.\scripts\Build-Release.ps1
 ```
 
-The output is written to `artifacts/rate-fix-v1.0.1/`; the single published binary is `AmazonMusicRateSwitcher.exe`. The GUI still locates the repository's `scripts` directory at runtime, so the binary is single-file but the application is not yet a script-free standalone package.
+The release script reads the version from the GUI project, publishes the single-file EXE, packages the required `config.json` and three runtime scripts, and rejects an archive containing missing or unexpected files. The GUI still locates the adjacent `scripts` directory at runtime, so the binary is single-file but the application is not yet a script-free standalone package.
 
 ## Repository layout
 
 - `src`: maintainable WinForms GUI source
+- `tests`: unit tests for typed GUI/backend protocol parsing
 - `scripts`: PowerShell backend, setup, and ASIO Bridge management scripts
 - `scripts/launchers`: CMD launchers for normal startup and AutoTest
 - `assets`: README assets
@@ -69,12 +71,13 @@ The output is written to `artifacts/rate-fix-v1.0.1/`; the single published bina
 - `artifacts`: local build output, excluded from Git
 - `state`: device backup, runtime state, and test reports, excluded from Git
 - `tools/SoundVolumeView`: downloaded locally by the setup script, excluded from Git
+- `.github`: pull-request build, test, dependency update, and release-package validation
 
 ## Tested environment
 
 - Windows 11 64-bit, build 26200
 - Amazon Music Store package 9.5.2.0 / executable 9.5.2.2478
 - PowerShell 5.1
-- .NET 6 Windows Desktop SDK
+- .NET 10 Windows Desktop SDK
 - VB-Audio Hi-Fi Cable
 - ASIO4ALL & FiiO ASIO Driver

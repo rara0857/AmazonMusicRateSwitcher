@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -65,6 +64,7 @@ internal static class RoundedUi
 
 internal sealed class TabButton : FocuslessButton
 {
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public bool Selected { get; set; }
 
     public TabButton()
@@ -112,13 +112,6 @@ internal sealed class TabButton : FocuslessButton
             TextFormatFlags.NoPrefix);
     }
 }
-
-internal sealed record TrackMetadata(
-    string Asin,
-    string Title,
-    string Artist,
-    string Album,
-    string ArtworkUrl);
 
 internal static class ProjectRoot
 {
@@ -212,7 +205,7 @@ internal sealed class MainForm : Form
     public MainForm(string projectRoot)
     {
         _projectRoot = projectRoot;
-        Text = "Rate Changer";
+        Text = "Rate Switcher";
         StartPosition = FormStartPosition.CenterScreen;
         // The compact UI is deliberately capped at a 150% design scale. Let
         // the form apply that cap itself so 225% Windows scaling does not
@@ -471,7 +464,7 @@ internal sealed class MainForm : Form
         var title = new Label
         {
             Dock = DockStyle.Fill,
-            Text = "Rate Changer",
+            Text = "Rate Switcher",
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Color.FromArgb(185, 188, 197),
             Font = new Font("Segoe UI", 9F),
@@ -1166,69 +1159,30 @@ internal sealed class MainForm : Form
 
     private void HandleBackendLine(string text)
     {
-        const string formatPrefix = "@@AMRS_FORMAT@@";
-        const string base64Prefix = "@@AMRS_TRACK_B64@@";
-        const string legacyPrefix = "@@AMRS_TRACK@@";
-        const string autoTestSummaryPrefix = "@@AMRS_AUTOTEST_SUMMARY_B64@@";
-        const string exclusivePrefix = "@@AMRS_EXCLUSIVE@@";
-        if (text.StartsWith(exclusivePrefix, StringComparison.Ordinal))
+        var message = BackendMessageParser.Parse(text);
+        switch (message.Kind)
         {
-            var active = string.Equals(text[exclusivePrefix.Length..], "ON", StringComparison.OrdinalIgnoreCase);
-            if (SelectedMode == OutputMode.AsioExclusive)
-                SetExclusiveStatus(active);
-            return;
+            case BackendMessageKind.Exclusive:
+                if (SelectedMode == OutputMode.AsioExclusive)
+                    SetExclusiveStatus(message.Active);
+                return;
+            case BackendMessageKind.AutoTestSummary:
+                try { ApplyAutoTestSummary(message.Text); }
+                catch { AppendLog("AutoTest completed, but its UI summary could not be read."); }
+                return;
+            case BackendMessageKind.Format:
+                ApplyTrackFormat(message.Asin, message.Bits, message.RateHz);
+                return;
+            case BackendMessageKind.Track when message.Metadata is not null:
+                UpdateNowPlaying(message.Metadata);
+                return;
+            case BackendMessageKind.Error:
+                AppendLog("Backend error: " + message.Text);
+                return;
+            default:
+                AppendLog(message.Text);
+                return;
         }
-
-        if (text.StartsWith(autoTestSummaryPrefix, StringComparison.Ordinal))
-        {
-            try
-            {
-                var json = Encoding.UTF8.GetString(
-                    Convert.FromBase64String(text[autoTestSummaryPrefix.Length..]));
-                ApplyAutoTestSummary(json);
-            }
-            catch
-            {
-                AppendLog("AutoTest completed, but its UI summary could not be read.");
-            }
-            return;
-        }
-
-        if (text.StartsWith(formatPrefix, StringComparison.Ordinal))
-        {
-            var parts = text[formatPrefix.Length..].Split('|');
-            if (parts.Length == 3 &&
-                int.TryParse(parts[1], out var bits) &&
-                int.TryParse(parts[2], out var rateHz))
-            {
-                ApplyTrackFormat(parts[0], bits, rateHz);
-            }
-            return;
-        }
-
-        if (text.StartsWith(base64Prefix, StringComparison.Ordinal) ||
-            text.StartsWith(legacyPrefix, StringComparison.Ordinal))
-        {
-            try
-            {
-                var json = text.StartsWith(base64Prefix, StringComparison.Ordinal)
-                    ? Encoding.UTF8.GetString(Convert.FromBase64String(text[base64Prefix.Length..]))
-                    : text[legacyPrefix.Length..];
-                var metadata = JsonSerializer.Deserialize<TrackMetadata>(
-                    json,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                if (metadata is not null)
-                    UpdateNowPlaying(metadata);
-            }
-            catch
-            {
-                // Metadata is decorative. Playback switching must continue if
-                // Amazon changes an artwork or album field.
-            }
-            return;
-        }
-
-        AppendLog(text);
     }
 
     private void SetExclusiveStatus(bool active)
@@ -1297,9 +1251,9 @@ internal sealed class MainForm : Form
         }
 
         lines.Add(
-            $"Average latency: {ReadLatency(root, "AverageSuccessfulTrackMs")}  ·  " +
-            $"switched {ReadLatency(root, "AverageSuccessfulSwitchMs")}  ·  " +
-            $"same-format {ReadLatency(root, "AverageSuccessfulSameFormatMs")}");
+            $"Average: {ReadLatency(root, "AverageSuccessfulSwitcherReadyMs")}  ·  " +
+            $"Same format: {ReadLatency(root, "AverageSuccessfulSameFormatDecisionMs")}  ·  " +
+            $"Different format: {ReadLatency(root, "AverageSuccessfulDifferentFormatMs")}");
         _testSummary.Text = string.Join(Environment.NewLine, lines);
         _autoTestResultShown = true;
     }

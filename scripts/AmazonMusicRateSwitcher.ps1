@@ -31,9 +31,6 @@
 
     [string] $DeviceId,
 
-    [ValidateRange(500, 5000)]
-    [int] $RestartDelayMs = 0,
-
     [ValidateRange(1, 50)]
     [int] $TestTracks = 10
 )
@@ -425,6 +422,13 @@ function Write-Log {
     Write-Host ('[{0:HH:mm:ss}] {1}' -f (Get-Date), $Message) -ForegroundColor $Color
 }
 
+function Write-GuiError {
+    param([Parameter(Mandatory)][string] $Message)
+    if ($env:AMRS_GUI -ne '1') { return }
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Message))
+    [Console]::WriteLine('@@AMRS_ERROR_B64@@' + $payload)
+}
+
 function Get-MainWindow {
     $process = Get-Process -Name 'Amazon Music' -ErrorAction SilentlyContinue |
         Where-Object MainWindowHandle -ne 0 |
@@ -602,6 +606,39 @@ function Get-AmazonCdpPageWebSocket {
     return $null
 }
 
+function Connect-AmazonCdpRenderer {
+    param(
+        [Parameter(Mandatory)][int] $Port,
+        [ValidateRange(1, 60)][int] $TimeoutSeconds = 20
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $url = Get-AmazonCdpPageWebSocket -Port $Port
+        if ($url) {
+            try {
+                # A CDP websocket can be available while Amazon's page is
+                # still only its native splash. Require the Vue transport root
+                # before publishing the connection to the rest of the backend.
+                $probeExpression = "JSON.stringify({ready:document.readyState,app:!!document.querySelector('#app'),transport:!!document.querySelector('#transportContainer'),bodyLength:(document.body&&document.body.innerText||'').length})"
+                $probe = [AmazonCdp]::Evaluate($url, $probeExpression) | ConvertFrom-Json
+                $state = $probe.result.result.value | ConvertFrom-Json
+                if ($state.app -or $state.transport) {
+                    $script:CdpPort = $Port
+                    $script:CdpWebSocketUrl = $url
+                    Write-Log "CDP connected on port $Port; direct track/sample-rate switching is enabled." Green
+                    return $true
+                }
+            } catch {
+                $script:CdpLastError = $_.Exception.Message
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
 function Initialize-AmazonCdp {
     if (-not $script:CdpEnabled) { return $false }
     if ($script:CdpWebSocketUrl) { return $true }
@@ -612,12 +649,14 @@ function Initialize-AmazonCdp {
     # current window, playback position and native queue on repeated starts of
     # the switcher.
     $port = Find-AmazonCdpPort
+    $reusedExistingPort = [bool]$port
     if ($port) {
         Write-Log "Found an existing Amazon CDP port $port; reusing the current process without restarting Amazon." DarkGray
     } elseif ($script:CdpAllowLaunch -and -not $script:CdpLaunchAttempted) {
         $port = Get-FreeAmazonCdpPort
         if (-not (Start-AmazonWithCdp -Port $port)) {
-        $script:CdpLastError = 'Amazon has no usable CDP port.'
+            $script:CdpLastError = 'Amazon has no usable CDP port.'
+            Restart-AmazonNormallyAfterCdpFailure
             return $false
         }
         $script:CdpWasRelaunched = $true
@@ -634,33 +673,31 @@ function Initialize-AmazonCdp {
         return $false
     }
 
-    $deadline = (Get-Date).AddSeconds(20)
-    do {
-        $url = Get-AmazonCdpPageWebSocket -Port $port
-        if ($url) {
-            try {
-                # A CDP websocket can be available while Amazon's page is
-                # still only its native splash.  Require the Vue transport
-                # root before accepting the connection; otherwise later
-                # player calls would fail against an empty document.
-                $probeExpression = "JSON.stringify({ready:document.readyState,app:!!document.querySelector('#app'),transport:!!document.querySelector('#transportContainer'),bodyLength:(document.body&&document.body.innerText||'').length})"
-                $probe = [AmazonCdp]::Evaluate($url, $probeExpression) | ConvertFrom-Json
-                $state = $probe.result.result.value | ConvertFrom-Json
-                if ($state.app -or $state.transport) {
-                    $script:CdpPort = $port
-                    $script:CdpWebSocketUrl = $url
-                    Write-Log "CDP connected on port $port; direct track/sample-rate switching is enabled." Green
-                    return $true
-                }
-            } catch {
-                $script:CdpLastError = $_.Exception.Message
+    $initialTimeoutSeconds = if ($reusedExistingPort) { 8 } else { 20 }
+    if (Connect-AmazonCdpRenderer -Port $port -TimeoutSeconds $initialTimeoutSeconds) {
+        return $true
+    }
+
+    # A live /json/version endpoint is not sufficient evidence that Amazon's
+    # renderer is usable. An existing debug process can remain on its splash
+    # page indefinitely. When launch permission was granted, replace that
+    # half-ready instance once and retry the complete renderer validation.
+    if ($reusedExistingPort -and $script:CdpAllowLaunch -and -not $script:CdpLaunchAttempted) {
+        Write-Log 'The existing CDP port did not expose a mounted Amazon renderer; performing one controlled debug relaunch.' Yellow
+        $script:CdpPort = 0
+        $script:CdpWebSocketUrl = $null
+        $port = Get-FreeAmazonCdpPort
+        if (Start-AmazonWithCdp -Port $port) {
+            $script:CdpWasRelaunched = $true
+            Start-Sleep -Seconds 5
+            if (Connect-AmazonCdpRenderer -Port $port -TimeoutSeconds 20) {
+                return $true
             }
         }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
+    }
 
     $script:CdpLastError = 'The Amazon renderer has a CDP port, but the web app is not mounted (splash screen or native bridge initialization).'
-    if ($script:CdpWasRelaunched) {
+    if ($script:CdpLaunchAttempted) {
         Restart-AmazonNormallyAfterCdpFailure
     }
     return $false
@@ -2304,11 +2341,8 @@ function Set-EndpointFormat {
         [Parameter(Mandatory)] $Format,
         $CurrentPlaying,
         [Parameter(Mandatory)] [int] $Channels,
-        [Parameter(Mandatory)] [int] $WaitForRebuildSeconds,
-        [Parameter(Mandatory)] [int] $RecoveryWaitSeconds,
         [string] $Asin = '',
         [hashtable] $AsinFormats,
-        [int] $RestartDelayMilliseconds = 3500,
         [hashtable] $Timing
     )
 
@@ -2547,8 +2581,7 @@ switch ($Mode) {
             Write-Log 'Dry run: no format was changed. Add -Apply to perform the switch.' Yellow
             break
         }
-        $delay = if ($RestartDelayMs -gt 0) { $RestartDelayMs } else { [int]$config.restartDelayMs }
-        $onceSuccess = Set-EndpointFormat -Device $device -Format $snapshot.Track -CurrentPlaying $snapshot.Playing -Channels ([int]$config.channels) -WaitForRebuildSeconds ([int]$config.waitForRebuildSeconds) -RecoveryWaitSeconds ([int]$config.recoveryWaitSeconds) -Asin ([string]$snapshot.Asin) -RestartDelayMilliseconds $delay
+        $onceSuccess = Set-EndpointFormat -Device $device -Format $snapshot.Track -CurrentPlaying $snapshot.Playing -Channels ([int]$config.channels) -Asin ([string]$snapshot.Asin)
         if ($onceSuccess -and $script:ExclusiveMode -and $script:CdpEnabled -and $script:CdpWebSocketUrl) {
             $onceExclusive = Set-AmazonCdpOutputMode -EnableExclusive $true -AmazonDeviceId ([string]$device.'Item ID') -ForceExclusiveCycle
             if (-not $onceExclusive.Success) { throw "Amazon Exclusive could not be armed after the one-shot format change: $($onceExclusive.Reason)" }
@@ -2731,6 +2764,7 @@ switch ($Mode) {
                 $resumeSucceeded = $true
                 $resumeResult = $null
                 $resumedForSwitch = $false
+                $playbackStrictlyConfirmed = $false
 
                 try {
                 $playbackState = if ($cdpCurrent) { [string]$cdpCurrent.State } else { '' }
@@ -2912,17 +2946,13 @@ switch ($Mode) {
                     # After the format switch, seek to about 4.5 seconds and
                     # invoke Previous immediately to restart the current track,
                     # then re-arm Exclusive and resume.
-                    $delay = if ($RestartDelayMs -gt 0) { $RestartDelayMs } else { [int]$config.restartDelayMs }
                     $success = Set-EndpointFormat `
                         -Device $monitorDevice `
                         -Format $format `
                         -CurrentPlaying $null `
                         -Channels ([int]$config.channels) `
-                        -WaitForRebuildSeconds ([int]$config.waitForRebuildSeconds) `
-                        -RecoveryWaitSeconds ([int]$config.recoveryWaitSeconds) `
                         -Asin $asin `
                         -AsinFormats $asinFormats `
-                        -RestartDelayMilliseconds $delay `
                         -Timing $timing
                     if ($success) {
                         $reason = 'Sample-rate switch and one Exclusive cycle succeeded'
@@ -3032,6 +3062,7 @@ switch ($Mode) {
                     }
 
                     if ($postResume) {
+                        $playbackStrictlyConfirmed = $true
                         if (-not $recovered) {
                             Write-Log "Amazon playback confirmed at $($postResume.Playing.Text) with Exclusive=$script:ExclusiveMode after resume." Green
                             if ($reason -eq 'Same format; no endpoint action needed') {
@@ -3057,15 +3088,18 @@ switch ($Mode) {
                 if (-not $timing.ContainsKey('PlaybackCommandMs')) {
                     $timing['PlaybackCommandMs'] = $timing['TotalTrackMs']
                 }
-                # Switched (and fallback-paused same-format) tracks are only
-                # audibly ready once strict Playing-format verification ends.
-                # Same-format tracks that never paused were already playing at
-                # the command checkpoint.
-                $timing['PlaybackConfirmedMs'] = if ($resumedForSwitch) {
+                # Keep control-pipeline completion separate from Amazon's
+                # strictly verified Playing state. Same-format tracks stay on
+                # the fast path and deliberately skip the slower telemetry
+                # wait, so claiming that checkpoint as playback confirmation
+                # would mix two incompatible measurements in one average.
+                $timing['SwitcherReadyMs'] = $timing['PlaybackCommandMs']
+                $timing['PlaybackConfirmedMs'] = if ($playbackStrictlyConfirmed) {
                     $timing['TotalTrackMs']
                 } else {
-                    $timing['PlaybackCommandMs']
+                    $null
                 }
+                $timing['VerificationCompleteMs'] = $timing['TotalTrackMs']
                 if ($script:ShowDetailedTiming) {
                     Write-Log ("Stage timing ms: pause={0}, format={1}, endpoint={2}, replay={3} (readyWait={4}, sought={5}, reset={6}), pauseAfterPrevious={7}, exclusive={8}, resume={9}, playCommand={10}, playbackConfirmed={11}" -f `
                         $timing['PauseMs'], $timing['TrackEventToFormatMs'], $timing['EndpointFormatMs'], `
@@ -3115,6 +3149,7 @@ switch ($Mode) {
                     }
                 }
             } catch {
+                Write-GuiError $_.Exception.Message
                 Write-Log $_.Exception.Message Red
             }
             Start-Sleep -Milliseconds $trackPollMilliseconds
@@ -3133,25 +3168,27 @@ switch ($Mode) {
             $successfulSameFormatResults = @($successfulResults | Where-Object {
                 [int]$_.Timing.EndpointFormatMs -le 0
             })
-            $successfulTrackValues = @($successfulResults | ForEach-Object { [double]$_.Timing.PlaybackConfirmedMs })
-            $successfulSwitchValues = @($successfulSwitchResults | ForEach-Object { [double]$_.Timing.PlaybackConfirmedMs })
-            $successfulSameFormatValues = @($successfulSameFormatResults | ForEach-Object { [double]$_.Timing.PlaybackConfirmedMs })
-            $successfulCommandValues = @($successfulResults | ForEach-Object { [double]$_.Timing.PlaybackCommandMs })
+            $successfulReadyValues = @($successfulResults | ForEach-Object { [double]$_.Timing.SwitcherReadyMs })
+            $successfulSwitchConfirmedValues = @($successfulSwitchResults | Where-Object {
+                $null -ne $_.Timing.PlaybackConfirmedMs
+            } | ForEach-Object { [double]$_.Timing.PlaybackConfirmedMs })
+            $successfulSameFormatDecisionValues = @($successfulSameFormatResults | ForEach-Object { [double]$_.Timing.SwitcherReadyMs })
+            $successfulDifferentFormatReadyValues = @($successfulSwitchResults | ForEach-Object { [double]$_.Timing.SwitcherReadyMs })
             $successfulVerificationValues = @($successfulResults | ForEach-Object { [double]$_.Timing.TotalTrackMs })
-            $averageSuccessfulTrackMs = if ($successfulResults.Count -gt 0) {
-                [Math]::Round([double](@($successfulTrackValues | Measure-Object -Average).Average), 1)
+            $averageSuccessfulReadyMs = if ($successfulReadyValues.Count -gt 0) {
+                [Math]::Round([double](@($successfulReadyValues | Measure-Object -Average).Average), 1)
             } else { $null }
-            $averageSuccessfulSwitchMs = if ($successfulSwitchResults.Count -gt 0) {
-                [Math]::Round([double](@($successfulSwitchValues | Measure-Object -Average).Average), 1)
+            $averageSuccessfulSwitchConfirmedMs = if ($successfulSwitchConfirmedValues.Count -gt 0) {
+                [Math]::Round([double](@($successfulSwitchConfirmedValues | Measure-Object -Average).Average), 1)
             } else { $null }
-            $averageSuccessfulSameFormatMs = if ($successfulSameFormatResults.Count -gt 0) {
-                [Math]::Round([double](@($successfulSameFormatValues | Measure-Object -Average).Average), 1)
+            $averageSuccessfulSameFormatDecisionMs = if ($successfulSameFormatDecisionValues.Count -gt 0) {
+                [Math]::Round([double](@($successfulSameFormatDecisionValues | Measure-Object -Average).Average), 1)
+            } else { $null }
+            $averageSuccessfulDifferentFormatMs = if ($successfulDifferentFormatReadyValues.Count -gt 0) {
+                [Math]::Round([double](@($successfulDifferentFormatReadyValues | Measure-Object -Average).Average), 1)
             } else { $null }
             $averageSuccessfulVerificationMs = if ($successfulResults.Count -gt 0) {
                 [Math]::Round([double](@($successfulVerificationValues | Measure-Object -Average).Average), 1)
-            } else { $null }
-            $averageSuccessfulCommandMs = if ($successfulResults.Count -gt 0) {
-                [Math]::Round([double](@($successfulCommandValues | Measure-Object -Average).Average), 1)
             } else { $null }
             $summaryPath = Join-Path $script:StateDirectory 'auto-test-summary.json'
             $failureDetails = @($testResults | Where-Object { -not $_.Success } | ForEach-Object {
@@ -3169,10 +3206,10 @@ switch ($Mode) {
                 Passed = $passed
                 Failed = $testResults.Count - $passed
                 AllPassed = ($passed -eq $testResults.Count -and $testResults.Count -eq $TestTracks)
-                AverageSuccessfulTrackMs = $averageSuccessfulTrackMs
-                AverageSuccessfulSwitchMs = $averageSuccessfulSwitchMs
-                AverageSuccessfulSameFormatMs = $averageSuccessfulSameFormatMs
-                AverageSuccessfulPlayCommandMs = $averageSuccessfulCommandMs
+                AverageSuccessfulSwitcherReadyMs = $averageSuccessfulReadyMs
+                AverageSuccessfulSwitchConfirmedMs = $averageSuccessfulSwitchConfirmedMs
+                AverageSuccessfulSameFormatDecisionMs = $averageSuccessfulSameFormatDecisionMs
+                AverageSuccessfulDifferentFormatMs = $averageSuccessfulDifferentFormatMs
                 AverageSuccessfulVerificationCompleteMs = $averageSuccessfulVerificationMs
                 Failures = $failureDetails
                 ResultsFile = 'auto-test-latest.json'
@@ -3180,9 +3217,9 @@ switch ($Mode) {
             $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8
             Write-Host ''
             $testResults | Format-Table Number, Asin, Target, Success, Resumed, Reason -AutoSize
-            if ($null -ne $averageSuccessfulTrackMs) {
-                Write-Log ("AutoTest latency: average successful track={0} ms; switched={1} ms; same-format={2} ms." -f `
-                    $averageSuccessfulTrackMs, $averageSuccessfulSwitchMs, $averageSuccessfulSameFormatMs) DarkGray
+            if ($null -ne $averageSuccessfulReadyMs) {
+                Write-Log ("AutoTest timing: average={0} ms; same-format={1} ms; different-format={2} ms." -f `
+                    $averageSuccessfulReadyMs, $averageSuccessfulSameFormatDecisionMs, $averageSuccessfulDifferentFormatMs) DarkGray
             } else {
                 Write-Log 'AutoTest latency: no successful track timing was available.' Yellow
             }
@@ -3206,6 +3243,10 @@ switch ($Mode) {
     Write-Log "Restored $($state.DeviceId): $($state.OriginalFormat)" Green
     }
 }
+}
+catch {
+    Write-GuiError $_.Exception.Message
+    throw
 }
 finally {
     if ($script:InstanceMutexAcquired -and $script:InstanceMutex) {

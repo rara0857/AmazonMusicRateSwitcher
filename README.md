@@ -8,7 +8,7 @@ Rate Switcher reads the track format and switches automatically to minimize unne
 **Audio path:** Amazon Music Exclusive → Hi-Fi Cable → ASIO Bridge → DAC
 
 <p align="center">
-  <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Changer desktop app">
+  <img src="assets/app-preview.png?v=75235f8" width="350" alt="Amazon Music Rate Switcher desktop app">
 </p>
 
 <p align="center">
@@ -35,17 +35,19 @@ flowchart LR
 
 ## Quick start
 
-1. Install [VB-Audio Hi-Fi CABLE & ASIO Bridge](https://vb-audio.com/Cable/).
-2. Install a DAC ASIO driver or [ASIO4ALL](https://asio4all.org/about/download-asio4all/).
-3. Download the [latest release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases) and run `AmazonMusicRateSwitcher.exe`.
-4. Select the ASIO driver in ASIO Bridge, then click **START**.
+1. Install the official Amazon Music for Windows desktop app and sign in.
+2. Install [VB-Audio Hi-Fi CABLE & ASIO Bridge](https://vb-audio.com/Cable/).
+3. Install a DAC ASIO driver or [ASIO4ALL](https://asio4all.org/about/download-asio4all/).
+4. Download and fully extract the [latest release](https://github.com/rara0857/AmazonMusicRateSwitcher/releases). Keep the EXE, `config.json`, and `scripts` folder together, then run `AmazonMusicRateSwitcher.exe`.
+5. Select the ASIO driver in ASIO Bridge, then click **START**.
 
 Before testing, start playback and leave at least 10 playable tracks in the queue.
 
 ## Notes
 
-- A format change usually adds about 0.5–2 seconds; same-format tracks start immediately.
-- When CDP/debug mode is enabled, the app may close and reopen the Amazon Music window once to establish the control connection.
+- A format change usually adds about 0.5–2 seconds. Same-format tracks avoid extra endpoint work, although Amazon's own playback startup time can still vary.
+- The app reuses an existing Debug/CDP connection. If none is available, it may close and reopen Amazon Music once to establish one.
+- First-run setup downloads the approved SoundVolumeView v2.53 executable and verifies its SHA-256 before installation.
 - Tested on Windows 11 x64 with Amazon Music for Windows 9.5.2.0.
 
 ## Credit
